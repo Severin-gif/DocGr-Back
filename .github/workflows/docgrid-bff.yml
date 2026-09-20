@@ -1,0 +1,64 @@
+name: DocGrid BFF
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "package*.json"
+      - ".dockerignore"
+      - ".github/workflows/docgrid-bff.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+
+      - name: Build production image
+        run: docker build --progress=plain -t docgrid-bff:ci .
+
+      - name: Start without any database
+        run: |
+          docker run --detach             --name docgrid-bff-ci             --cap-drop ALL             --security-opt no-new-privileges             -e PORT=4000             -e LEGAL_CORE_URL=https://example.invalid             -e CORS_ORIGINS=https://docgrid.ru             -p 127.0.0.1:3400:4000             docgrid-bff:ci
+          test "$(docker exec docgrid-bff-ci id -u)" != 0
+
+      - name: Liveness is independent from DB/upstream
+        run: |
+          node - <<'NODE'
+          const health = await fetch('http://127.0.0.1:3400/health');
+          if (health.status !== 200) throw new Error('health='+health.status);
+          const body = await health.json();
+          if (body.service !== 'docgrid-bff' || body.database !== 'none') throw new Error(JSON.stringify(body));
+
+          const forbidden = await fetch('http://127.0.0.1:3400/api/projects', {
+            headers: { Authorization: 'Bearer fake' }
+          });
+          if (forbidden.status !== 404) throw new Error('legacy route exposed: '+forbidden.status);
+
+          const unauth = await fetch('http://127.0.0.1:3400/api/docgrid/repositories');
+          if (unauth.status !== 401) throw new Error('missing auth not rejected: '+unauth.status);
+          NODE
+
+      - name: Container output
+        if: always()
+        run: docker logs docgrid-bff-ci 2>&1 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f docgrid-bff-ci 2>/dev/null || true
