@@ -41,8 +41,24 @@ jobs:
       - name: Liveness is independent from DB/upstream
         run: |
           node - <<'NODE'
-          const health = await fetch('http://127.0.0.1:3400/health');
-          if (health.status !== 200) throw new Error('health='+health.status);
+          import { setTimeout as delay } from 'node:timers/promises';
+
+          let health;
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            try {
+              const response = await fetch('http://127.0.0.1:3400/health', {
+                signal: AbortSignal.timeout(1500),
+              });
+              if (response.status === 200) {
+                health = response;
+                break;
+              }
+              await response.body?.cancel();
+            } catch {}
+            await delay(500);
+          }
+          if (!health) throw new Error('BFF did not become healthy');
+
           const body = await health.json();
           if (body.service !== 'docgrid-bff' || body.database !== 'none') throw new Error(JSON.stringify(body));
 
