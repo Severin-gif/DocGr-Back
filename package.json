@@ -7,8 +7,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "db:migrate": "node dist/migrate.js",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test dist/proxy-policy.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -26,5 +26,7 @@
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },
-  "engines": { "node": ">=24" }
+  "engines": {
+    "node": ">=24"
+  }
 }
