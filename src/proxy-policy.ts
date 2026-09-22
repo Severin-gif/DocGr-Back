@@ -1,6 +1,17 @@
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 
-type Rule = { method: "GET" | "POST" | "PUT"; pattern: RegExp; query?: Set<string> };
+export type BodyKind = "json" | "multipart";
+export type ResponseKind = "json" | "binary";
+
+type Rule = {
+  method: "GET" | "POST" | "PUT";
+  pattern: RegExp;
+  query?: Set<string>;
+  body?: BodyKind;
+  response?: ResponseKind;
+};
+
+export type RouteRule = { body: BodyKind; response: ResponseKind; query?: Set<string> };
 
 const rules: Rule[] = [
   { method: "GET", pattern: /^\/api\/docgrid\/repositories$/ },
@@ -10,6 +21,16 @@ const rules: Rule[] = [
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/branches$`) },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/branches$`) },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/artifacts$`) },
+
+  // Файловое дерево, папки и исходные материалы (workspace v2)
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/files$`), query: new Set(["trash"]) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/folders$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/materials$`), body: "multipart" },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/materials/${UUID}/download$`), response: "binary" },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/files/${UUID}/trash$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/members$`) },
+  { method: "PUT", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/members$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/judgments/${UUID}$`) },
 
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/reviews$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/issues$`) },
@@ -23,26 +44,34 @@ const rules: Rule[] = [
   { method: "PUT", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/documents/${UUID}$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/commits$`), query: new Set(["limit"]) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/compare/${UUID}$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/documents/${UUID}/restore$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/documents/${UUID}/comments$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/documents/${UUID}/comments$`) },
 
   { method: "GET", pattern: new RegExp(`^/api/docgrid/commits/${UUID}$`) },
 
   { method: "POST", pattern: /^\/api\/docgrid\/reviews$/ },
-  { method: "POST", pattern: new RegExp(`^/api/docgrid/reviews/${UUID}/(?:merge|close)$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/reviews/${UUID}/(?:merge|close|refresh)$`) },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/issues/${UUID}/decide$`) },
 ];
 
-export function isAllowedDocGridRequest(method: string, pathname: string, searchParams: URLSearchParams): boolean {
+export function resolveDocGridRoute(method: string, pathname: string, searchParams: URLSearchParams): RouteRule | null {
   const normalizedMethod = method.toUpperCase();
   const rule = rules.find((item) => item.method === normalizedMethod && item.pattern.test(pathname));
-  if (!rule) return false;
+  if (!rule) return null;
 
   const seen = new Set<string>();
   for (const [key, value] of searchParams.entries()) {
-    if (!rule.query?.has(key) || seen.has(key)) return false;
+    if (!rule.query?.has(key) || seen.has(key)) return null;
     seen.add(key);
-    if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) return false;
+    if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) return null;
+    if (key === "trash" && value !== "true" && value !== "false") return null;
   }
-  return true;
+  return { body: rule.body ?? "json", response: rule.response ?? "json", query: rule.query };
+}
+
+export function isAllowedDocGridRequest(method: string, pathname: string, searchParams: URLSearchParams): boolean {
+  return resolveDocGridRoute(method, pathname, searchParams) !== null;
 }
 
 export function readBearer(header: string | undefined): string | null {
