@@ -28,7 +28,9 @@ function audienceMatches(aud: string | string[]): boolean {
 export function verifyDocGridAccessToken(token: string, nowSeconds = Math.floor(Date.now() / 1000)): DocGridIdentity {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("malformed_token");
-  const [headerB64, payloadB64, signatureB64] = parts;
+  const headerB64 = parts[0]!;
+  const payloadB64 = parts[1]!;
+  const signatureB64 = parts[2]!;
 
   const header = decodeBase64UrlJson<{ alg?: string; typ?: string }>(headerB64);
   if (header.alg !== "HS256") throw new Error("unsupported_algorithm");
