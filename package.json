@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "check": "tsc --noEmit",
-    "test": "npm run build && node --test dist/proxy-policy.test.js"
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
