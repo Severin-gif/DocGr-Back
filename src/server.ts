@@ -4,6 +4,7 @@ import helmet from "helmet";
 import { randomUUID } from "node:crypto";
 import { allowedOrigins, config, legalCoreUrl } from "./config.js";
 import { buildUpstreamUrl, isAllowedDocGridRequest, readBearer } from "./proxy-policy.js";
+import { trustedIdentityHeaders, verifyDocGridAccessToken } from "./docgrid-identity.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -85,6 +86,13 @@ app.use("/api/docgrid", async (req, res, next) => {
     const token = readBearer(req.header("authorization"));
     if (!token) return res.status(401).json({ error: "Требуется DocGrid access token", requestId: id });
 
+    let identity;
+    try {
+      identity = verifyDocGridAccessToken(token);
+    } catch {
+      return res.status(401).json({ error: "Invalid DocGrid identity token", requestId: id });
+    }
+
     if (["POST", "PUT"].includes(req.method)) {
       const contentType = req.header("content-type")?.split(";")[0]?.trim().toLowerCase();
       if (contentType !== "application/json") {
@@ -101,10 +109,10 @@ app.use("/api/docgrid", async (req, res, next) => {
         redirect: "error",
         signal: AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
         headers: {
-          Authorization: `Bearer ${token}`,
           Accept: "application/json",
           "Content-Type": "application/json",
           "X-Request-ID": id,
+          ...trustedIdentityHeaders(identity),
         },
         body: ["POST", "PUT"].includes(req.method) ? JSON.stringify(req.body ?? {}) : undefined,
       });

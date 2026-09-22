@@ -29,7 +29,9 @@ It does not:
 - expose legal-core internal/admin routes;
 - call OpenRouter directly.
 
-The browser obtains a short-lived `docgrid_access` token from AI-Orchestra. This BFF forwards that Bearer token only to the allowlisted `/api/docgrid/*` routes in legal-core.
+The browser obtains a short-lived `docgrid_access` token from AI-Orchestra. This BFF verifies its HS256 signature, issuer, audience, type and expiry. The browser token terminates here and is never forwarded to legal-core.
+
+After verification the BFF sends normalized identity headers to legal-core together with the independent server-only `DOCGRID_SERVICE_TOKEN`.
 
 ## TimeWeb
 
@@ -51,6 +53,11 @@ CORS_ORIGINS=https://docgrid.ru,https://www.docgrid.ru
 UPSTREAM_TIMEOUT_MS=90000
 UPSTREAM_READY_TIMEOUT_MS=5000
 MAX_RESPONSE_BYTES=32000000
+
+DOCGRID_IDENTITY_JWT_SECRET=<same as AI-Orchestra>
+DOCGRID_IDENTITY_ISSUER=ai-orchestra
+DOCGRID_IDENTITY_AUDIENCE=legal-core-docgrid
+DOCGRID_SERVICE_TOKEN=<same as legal-core>
 ```
 
 There is **no DATABASE_URL** in this service anymore.
