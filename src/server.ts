@@ -3,7 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import { randomUUID } from "node:crypto";
 import { allowedOrigins, config, legalCoreUrl } from "./config.js";
-import { buildUpstreamUrl, isAllowedDocGridRequest, readBearer } from "./proxy-policy.js";
+import { buildUpstreamUrl, readBearer, resolveDocGridRoute } from "./proxy-policy.js";
 import { trustedIdentityHeaders, verifyDocGridAccessToken } from "./docgrid-identity.js";
 
 const app = express();
@@ -22,6 +22,10 @@ app.use(cors({
   },
 }));
 app.use(express.json({ limit: "2mb", strict: true }));
+// Загрузка исходных материалов: multipart/form-data пробрасывается как есть,
+// лимит согласован с FileInterceptor legal-core (10 МБ на файл) плюс запас на поля формы.
+const MULTIPART_LIMIT = "11mb";
+app.use(express.raw({ type: "multipart/form-data", limit: MULTIPART_LIMIT }));
 
 function requestId(req: Request): string {
   const supplied = req.header("x-request-id");
@@ -29,8 +33,8 @@ function requestId(req: Request): string {
   return randomUUID();
 }
 
-async function readBounded(response: globalThis.Response, maxBytes: number): Promise<string> {
-  if (!response.body) return "";
+async function readBoundedBytes(response: globalThis.Response, maxBytes: number): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -48,8 +52,14 @@ async function readBounded(response: globalThis.Response, maxBytes: number): Pro
   } finally {
     reader.releaseLock();
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 }
+
+async function readBounded(response: globalThis.Response, maxBytes: number): Promise<string> {
+  return (await readBoundedBytes(response, maxBytes)).toString("utf8");
+}
+
+const SAFE_DISPOSITION = /^attachment;\s*filename\*=UTF-8''[A-Za-z0-9%._-]{1,600}$/;
 
 app.get("/health", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -79,7 +89,8 @@ app.use("/api/docgrid", async (req, res, next) => {
 
   try {
     const incoming = new URL(req.originalUrl, "https://api.docgrid.ru");
-    if (!isAllowedDocGridRequest(req.method, incoming.pathname, incoming.searchParams)) {
+    const route = resolveDocGridRoute(req.method, incoming.pathname, incoming.searchParams);
+    if (!route) {
       return res.status(404).json({ error: "Маршрут DocGrid не разрешён", requestId: id });
     }
 
@@ -93,10 +104,23 @@ app.use("/api/docgrid", async (req, res, next) => {
       return res.status(401).json({ error: "Invalid DocGrid identity token", requestId: id });
     }
 
-    if (["POST", "PUT"].includes(req.method)) {
-      const contentType = req.header("content-type")?.split(";")[0]?.trim().toLowerCase();
-      if (contentType !== "application/json") {
-        return res.status(415).json({ error: "Ожидается application/json", requestId: id });
+    const hasBody = ["POST", "PUT"].includes(req.method);
+    const rawContentType = req.header("content-type") ?? "";
+    const contentType = rawContentType.split(";")[0]?.trim().toLowerCase();
+    let upstreamBody: BodyInit | undefined;
+    let upstreamContentType = "application/json";
+    if (hasBody) {
+      if (route.body === "multipart") {
+        if (contentType !== "multipart/form-data" || !Buffer.isBuffer(req.body)) {
+          return res.status(415).json({ error: "Ожидается multipart/form-data", requestId: id });
+        }
+        upstreamBody = new Blob([new Uint8Array(req.body as Buffer)]);
+        upstreamContentType = rawContentType;
+      } else {
+        if (contentType !== "application/json") {
+          return res.status(415).json({ error: "Ожидается application/json", requestId: id });
+        }
+        upstreamBody = JSON.stringify(req.body ?? {});
       }
     }
 
@@ -109,12 +133,12 @@ app.use("/api/docgrid", async (req, res, next) => {
         redirect: "error",
         signal: AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
         headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
+          Accept: route.response === "binary" ? "application/octet-stream, application/json" : "application/json",
+          ...(hasBody ? { "Content-Type": upstreamContentType } : {}),
           "X-Request-ID": id,
           ...trustedIdentityHeaders(identity),
         },
-        body: ["POST", "PUT"].includes(req.method) ? JSON.stringify(req.body ?? {}) : undefined,
+        body: upstreamBody,
       });
     } catch (error) {
       console.warn(JSON.stringify({
@@ -129,9 +153,30 @@ app.use("/api/docgrid", async (req, res, next) => {
       return res.status(502).json({ error: "legal-core недоступен", requestId: id });
     }
 
+    const upstreamType = upstream.headers.get("content-type") ?? "";
+    const isJson = /(^|;)\s*application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/i.test(upstreamType);
+
+    if (route.response === "binary" && upstream.ok && !isJson) {
+      const bytes = await readBoundedBytes(upstream, config.MAX_RESPONSE_BYTES);
+      const disposition = upstream.headers.get("content-disposition") ?? "";
+      console.info(JSON.stringify({
+        service: "docgrid-bff",
+        event: "proxy.completed",
+        requestId: id,
+        method: req.method,
+        path: incoming.pathname,
+        upstreamStatus: upstream.status,
+        latencyMs: Date.now() - started,
+        bytes: bytes.byteLength,
+      }));
+      res.status(upstream.status);
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      if (SAFE_DISPOSITION.test(disposition)) res.setHeader("Content-Disposition", disposition);
+      return res.send(bytes);
+    }
+
     const body = await readBounded(upstream, config.MAX_RESPONSE_BYTES);
-    const contentType = upstream.headers.get("content-type") ?? "";
-    const isJson = /(^|;)\s*application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/i.test(contentType);
     if (!isJson && body) {
       console.warn(JSON.stringify({
         service: "docgrid-bff",
