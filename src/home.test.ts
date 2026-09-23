@@ -17,14 +17,14 @@ test("aggregates repositories, notifications and mode-specific activity", () => 
   ];
   const groups = [
     {
-      repository: repositories[0],
+      repository: repositories[0]!,
       activity: [
         { id: "e1", projectId: "r1", eventType: "folder.created", createdAt: "2026-09-22T10:00:00Z" },
         { id: "e2", projectId: "r1", eventType: "commit.created", createdAt: "2026-09-22T11:00:00Z" },
       ],
     },
     {
-      repository: repositories[1],
+      repository: repositories[1]!,
       activity: [
         { id: "e3", projectId: "r2", eventType: "review.opened", createdAt: "2026-09-22T12:00:00Z" },
       ],
@@ -34,7 +34,7 @@ test("aggregates repositories, notifications and mode-specific activity", () => 
   const feed = buildHomeDashboard(repositories, groups, "feed", 10);
   assert.deepEqual(feed.notifications, { openReviews: 3, openIssues: 3, documents: 6 });
   assert.deepEqual(feed.activity.map((item) => item.id), ["e3", "e2"]);
-  assert.equal(feed.activity[0].repositoryName, "Beta");
+  assert.equal(feed.activity[0]!.repositoryName, "Beta");
 
   const journal = buildHomeDashboard(repositories, groups, "journal", 10);
   assert.deepEqual(journal.activity.map((item) => item.id), ["e3", "e2", "e1"]);
