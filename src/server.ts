@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { allowedOrigins, config, legalCoreUrl } from "./config.js";
 import { buildUpstreamUrl, readBearer, resolveDocGridRoute } from "./proxy-policy.js";
 import { trustedIdentityHeaders, verifyDocGridAccessToken } from "./docgrid-identity.js";
+import { buildHomeDashboard, HomeActivity, HomeRepository, parseHomeQuery } from "./home.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -59,6 +60,33 @@ async function readBounded(response: globalThis.Response, maxBytes: number): Pro
   return (await readBoundedBytes(response, maxBytes)).toString("utf8");
 }
 
+async function fetchUpstreamJson<T>(
+  path: string,
+  identity: ReturnType<typeof verifyDocGridAccessToken>,
+  requestIdValue: string,
+): Promise<T> {
+  const target = new URL(path, legalCoreUrl.replace(/\/+$/, "") + "/");
+  const response = await fetch(target, {
+    method: "GET",
+    redirect: "error",
+    signal: AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
+    headers: {
+      Accept: "application/json",
+      "X-Request-ID": requestIdValue,
+      ...trustedIdentityHeaders(identity),
+    },
+  });
+  const type = response.headers.get("content-type") ?? "";
+  const body = await readBounded(response, config.MAX_RESPONSE_BYTES);
+  if (!response.ok) {
+    throw Object.assign(new Error(`legal-core returned ${response.status}`), { status: response.status, body });
+  }
+  if (!/(^|;)\s*application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/i.test(type)) {
+    throw Object.assign(new Error("legal-core returned non-JSON"), { status: 502 });
+  }
+  return JSON.parse(body || "null") as T;
+}
+
 const SAFE_DISPOSITION = /^attachment;\s*filename\*=UTF-8''[A-Za-z0-9%._-]{1,600}$/;
 
 app.get("/health", (_req, res) => {
@@ -79,6 +107,61 @@ app.get("/ready", async (_req, res) => {
     return res.json({ status: "ready", upstream: "legal-core" });
   } catch {
     return res.status(503).json({ status: "not_ready", upstream: "legal-core" });
+  }
+});
+
+app.get("/api/docgrid/home", async (req, res, next) => {
+  const id = requestId(req);
+  res.setHeader("X-Request-ID", id);
+  res.setHeader("Cache-Control", "no-store");
+
+  try {
+    const query = parseHomeQuery(new URL(req.originalUrl, "https://api.docgrid.ru").searchParams);
+    if (!query) return res.status(400).json({ error: "Некорректные параметры Home", requestId: id });
+
+    const token = readBearer(req.header("authorization"));
+    if (!token) return res.status(401).json({ error: "Требуется DocGrid access token", requestId: id });
+
+    let identity;
+    try {
+      identity = verifyDocGridAccessToken(token);
+    } catch {
+      return res.status(401).json({ error: "Invalid DocGrid identity token", requestId: id });
+    }
+
+    const repositories = await fetchUpstreamJson<HomeRepository[]>(
+      "/api/docgrid/repositories",
+      identity,
+      id,
+    );
+
+    const recentRepositories = repositories.slice(0, 20);
+    const perRepositoryLimit = query.mode === "journal" ? 50 : 25;
+    const groups = await Promise.all(
+      recentRepositories.map(async (repository) => {
+        try {
+          const activity = await fetchUpstreamJson<HomeActivity[]>(
+            `/api/docgrid/repositories/${encodeURIComponent(repository.id)}/activity?limit=${perRepositoryLimit}`,
+            identity,
+            id,
+          );
+          return { repository, activity };
+        } catch (error) {
+          console.warn(JSON.stringify({
+            service: "docgrid-bff",
+            event: "home.activity.partial_failure",
+            requestId: id,
+            repositoryId: repository.id,
+            reason: error instanceof Error ? error.message : "unknown",
+          }));
+          return { repository, activity: [] as HomeActivity[] };
+        }
+      }),
+    );
+
+    return res.json(buildHomeDashboard(repositories, groups, query.mode, query.limit));
+  } catch (error) {
+    return next(error);
   }
 });
 
