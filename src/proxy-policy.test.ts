@@ -73,6 +73,8 @@ test("allows workspace v2 routes used by the current frontend", () => {
   assert.equal(isAllowedDocGridRequest("GET", `/api/docgrid/repositories/${P}/files`, q("trash=false")), true);
   assert.equal(isAllowedDocGridRequest("GET", `/api/docgrid/repositories/${P}/files`, q("trash=maybe")), false);
   assert.equal(isAllowedDocGridRequest("POST", `/api/docgrid/repositories/${P}/folders`, q()), true);
+  assert.equal(isAllowedDocGridRequest("PUT", `/api/docgrid/repositories/${P}`, q()), true);
+  assert.equal(isAllowedDocGridRequest("PUT", `/api/docgrid/repositories/${P}`, q("owner=other")), false);
   assert.equal(isAllowedDocGridRequest("POST", `/api/docgrid/repositories/${P}/files/${D}/trash`, q()), true);
   assert.equal(isAllowedDocGridRequest("GET", `/api/docgrid/repositories/${P}/members`, q()), true);
   assert.equal(isAllowedDocGridRequest("PUT", `/api/docgrid/repositories/${P}/members`, q()), true);

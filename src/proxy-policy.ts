@@ -16,6 +16,7 @@ export type RouteRule = { body: BodyKind; response: ResponseKind; query?: Set<st
 const rules: Rule[] = [
   { method: "GET", pattern: /^\/api\/docgrid\/repositories$/ },
   { method: "POST", pattern: /^\/api\/docgrid\/repositories$/ },
+  { method: "PUT", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}$`) },
 
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/overview$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/branches$`) },
