@@ -35,7 +35,7 @@ jobs:
 
       - name: Start without any database
         run: |
-          docker run --detach             --name docgrid-bff-ci             --cap-drop ALL             --security-opt no-new-privileges             -e PORT=4000             -e LEGAL_CORE_URL=https://example.invalid             -e CORS_ORIGINS=https://docgrid.ru             -p 127.0.0.1:3400:4000             docgrid-bff:ci
+          docker run --detach             --name docgrid-bff-ci             --cap-drop ALL             --security-opt no-new-privileges             -e PORT=4000             -e LEGAL_CORE_URL=https://example.invalid             -e CORS_ORIGINS=https://docgrid.ru             -e DOCGRID_IDENTITY_JWT_SECRET=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa             -e DOCGRID_SERVICE_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb             -p 127.0.0.1:3400:4000             docgrid-bff:ci
           test "$(docker exec docgrid-bff-ci id -u)" != 0
 
       - name: Liveness is independent from DB/upstream
