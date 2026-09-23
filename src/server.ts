@@ -174,7 +174,19 @@ app.use("/api/docgrid", async (req, res, next) => {
     const incoming = new URL(req.originalUrl, "https://api.docgrid.ru");
     const route = resolveDocGridRoute(req.method, incoming.pathname, incoming.searchParams);
     if (!route) {
-      return res.status(404).json({ error: "Маршрут DocGrid не разрешён", requestId: id });
+      console.warn(JSON.stringify({
+        service: "docgrid-bff",
+        event: "route.rejected",
+        requestId: id,
+        method: req.method,
+        path: incoming.pathname,
+        query: [...incoming.searchParams.keys()],
+      }));
+      return res.status(404).json({
+        code: "DOCGRID_ROUTE_NOT_ALLOWED",
+        error: "Маршрут DocGrid не разрешён",
+        requestId: id,
+      });
     }
 
     const token = readBearer(req.header("authorization"));
