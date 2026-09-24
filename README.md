@@ -108,3 +108,20 @@ Responses are bounded and `no-store`; errors do not include upstream bodies.
 
 `npm test` covers credential separation and the HTTP adapter with a synthetic
 upstream. Production rollout and a real project run remain separate steps.
+
+
+### Directory import and private originals
+
+Human `POST /api/docgrid/repositories/:projectId/materials/:id/relocate` forwards
+an exact source digest, previous path and target path to the domain backend. The
+backend enforces project write access, compare-and-set and destination conflicts.
+Multipart originals now stream with backpressure after identity verification,
+with a 501 MiB envelope ceiling. Human downloads stream up to the 500 MiB project
+limit; JSON and the separate Astra adapter keep their existing smaller bounds.
+`FILE_TRANSFER_TIMEOUT_MS` defaults to 300000 (range 10000–600000).
+
+The private originals bucket is configured on the service holding the DocGrid
+schema (`legal-core` in this deployment), using `DOCGRID_S3_*`. Doc-Back does not
+need bucket credentials and never returns a public S3 URL. Deploy the backend
+storage migration/relocation API first, this gateway second and the folder-import
+frontend last. No service or database ownership is moved by this change.

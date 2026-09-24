@@ -8,6 +8,10 @@ import { trustedIdentityHeaders, verifyDocGridAccessToken } from "./docgrid-iden
 import { buildHomeDashboard, HomeActivity, HomeRepository, parseHomeQuery } from "./home.js";
 import { createAstraRouter } from "./astra-proxy.js";
 
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { byteLimit, uploadStream, MAX_MATERIAL_BYTES, MAX_MULTIPART_BYTES } from "./file-transfer.js";
+
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -24,10 +28,6 @@ app.use(cors({
   },
 }));
 app.use(express.json({ limit: "2mb", strict: true }));
-// Отдельного лимита 10 МБ на файл нет. Верхняя граница multipart равна
-// квоте проекта (500 МБ) плюс небольшой запас на boundary и поле path.
-const MULTIPART_LIMIT = "501mb";
-app.use(express.raw({ type: "multipart/form-data", limit: MULTIPART_LIMIT }));
 
 function requestId(req: Request): string {
   const supplied = req.header("x-request-id");
@@ -214,10 +214,12 @@ app.use("/api/docgrid", async (req, res, next) => {
     let upstreamContentType = "application/json";
     if (hasBody) {
       if (route.body === "multipart") {
-        if (contentType !== "multipart/form-data" || !Buffer.isBuffer(req.body)) {
+        if (contentType !== "multipart/form-data" || !/boundary=/i.test(rawContentType)) {
           return res.status(415).json({ error: "Ожидается multipart/form-data", requestId: id });
         }
-        upstreamBody = new Blob([new Uint8Array(req.body as Buffer)]);
+        const declared = Number(req.header("content-length") || 0);
+        if (declared > MAX_MULTIPART_BYTES) return res.status(413).json({ error: "Загрузка превышает общий лимит проекта 500 МБ", requestId: id });
+        upstreamBody = uploadStream(req) as unknown as BodyInit;
         upstreamContentType = rawContentType;
       } else {
         if (contentType !== "application/json") {
@@ -234,7 +236,7 @@ app.use("/api/docgrid", async (req, res, next) => {
       upstream = await fetch(target, {
         method: req.method,
         redirect: "error",
-        signal: AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
+        signal: AbortSignal.timeout(route.body === "multipart" || route.response === "binary" ? config.FILE_TRANSFER_TIMEOUT_MS : config.UPSTREAM_TIMEOUT_MS),
         headers: {
           Accept: route.response === "binary" ? "application/octet-stream, application/json" : "application/json",
           ...(hasBody ? { "Content-Type": upstreamContentType } : {}),
@@ -242,8 +244,17 @@ app.use("/api/docgrid", async (req, res, next) => {
           ...trustedIdentityHeaders(identity),
         },
         body: upstreamBody,
+        ...(route.body === "multipart" ? { duplex: "half" } : {}),
       });
     } catch (error) {
+      if (route.body === "multipart") {
+        req.unpipe();
+        const stream = upstreamBody as unknown as Readable;
+        const oversized = (stream?.errored as { status?: number } | null)?.status === 413;
+        stream?.destroy();
+        req.resume();
+        if (oversized) return res.status(413).json({ error: "Загрузка превышает общий лимит проекта 500 МБ", requestId: id });
+      }
       console.warn(JSON.stringify({
         service: "docgrid-bff",
         event: "upstream.failed",
@@ -260,23 +271,20 @@ app.use("/api/docgrid", async (req, res, next) => {
     const isJson = /(^|;)\s*application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/i.test(upstreamType);
 
     if (route.response === "binary" && upstream.ok && !isJson) {
-      const bytes = await readBoundedBytes(upstream, config.MAX_RESPONSE_BYTES);
+      const declared = Number(upstream.headers.get("content-length") || 0);
+      if (declared > MAX_MATERIAL_BYTES) {
+        await upstream.body?.cancel();
+        return res.status(502).json({ error: "Файл превышает лимит проекта", requestId: id });
+      }
       const disposition = upstream.headers.get("content-disposition") ?? "";
-      console.info(JSON.stringify({
-        service: "docgrid-bff",
-        event: "proxy.completed",
-        requestId: id,
-        method: req.method,
-        path: incoming.pathname,
-        upstreamStatus: upstream.status,
-        latencyMs: Date.now() - started,
-        bytes: bytes.byteLength,
-      }));
       res.status(upstream.status);
       res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("X-Content-Type-Options", "nosniff");
       if (SAFE_DISPOSITION.test(disposition)) res.setHeader("Content-Disposition", disposition);
-      return res.send(bytes);
+      if (declared) res.setHeader("Content-Length", declared);
+      if (!upstream.body) return res.end();
+      await pipeline(Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream), byteLimit(MAX_MATERIAL_BYTES), res);
+      return;
     }
 
     const body = await readBounded(upstream, config.MAX_RESPONSE_BYTES);
@@ -314,6 +322,7 @@ app.use("/api/docgrid", async (req, res, next) => {
 app.use((_req, res) => res.status(404).json({ error: "Маршрут не найден" }));
 
 app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
+  if (res.headersSent) return res.destroy(error instanceof Error ? error : undefined);
   const known = error as { status?: number; statusCode?: number; type?: string; message?: string };
   if (known.type === "entity.too.large" || known.status === 413) {
     const multipart = (req.header("content-type") ?? "").toLowerCase().startsWith("multipart/form-data");
