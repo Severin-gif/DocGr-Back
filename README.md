@@ -95,6 +95,8 @@ CODEX Chat transport are introduced in this BFF.
   human DocGrid identity. Approval cannot be performed with an agent credential.
 - Exact agent download: `GET /api/docgrid/astra/artifacts/:artifactId/versions/:version/:format?projectId=:projectId`,
   where format is `docx` or `pdf`. Bearer is required; tokens are never put in URLs.
+- Verified original: `GET /api/docgrid/astra/sources/:sourceId/original?projectId=:projectId&snapshotId=:snapshotId&hash=:sha256`.
+  This also supports an unread original; it never claims successful extraction.
 - Exact human article/history/download paths remain under the project-scoped
   `/repositories/:projectId/astra/artifacts/` namespace.
 

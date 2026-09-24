@@ -66,6 +66,11 @@ test("direct adapter isolates credentials, rejects unknown routes and bounds dow
     assert.equal(result.headers.get("cache-control"), "no-store");
     assert.equal(result.headers.get("content-type"), "application/pdf");
     assert.equal(await result.text(), "%PDF-synthetic");
+    const original = `/api/docgrid/astra/sources/${artifactId}/original?projectId=${projectId}&snapshotId=${projectId}&hash=${"a".repeat(64)}`;
+    const source = await fetch(base + original, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(source.status, 200);
+    assert.equal(source.headers.get("content-type"), "application/octet-stream");
+    assert.equal((await fetch(base + original.replace("hash=", "other="), { headers: { Authorization: `Bearer ${token}` } })).status, 404);
     assert.equal((await fetch(base + file + "&projectId=" + projectId, { headers: { Authorization: `Bearer ${token}` } })).status, 404);
     mock = new Response("<h1>upstream exception</h1>", { headers: { "content-type": "text/html" } });
     const error = await post(toolPath);

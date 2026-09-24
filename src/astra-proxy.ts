@@ -12,6 +12,7 @@ type Options = {
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const FILE_ROUTE = new RegExp(`^/api/docgrid/astra/artifacts/${UUID}/versions/([1-9][0-9]{0,8})/(docx|pdf)$`);
 const PROJECT_ID = new RegExp(`^${UUID}$`);
+const SOURCE_ROUTE = new RegExp(`^/api/docgrid/astra/sources/(${UUID})/original$`);
 
 // This credential can enter only the agent adapter. It never becomes a human
 // identity and cannot reach the browser proxy or human approval endpoints.
@@ -31,7 +32,11 @@ export function createAstraRouter(options: Options): Router {
     const isTool = req.method === "POST" && /^\/api\/docgrid\/astra\/tools\/docgrid_[a-z_]{1,64}$/.test(url.pathname) && !url.search;
     const fileMatch = req.method === "GET" ? FILE_ROUTE.exec(url.pathname) : null;
     const isFile = fileMatch && [...url.searchParams.keys()].length === 1 && PROJECT_ID.test(url.searchParams.get("projectId") ?? "");
-    if (!isTool && !isFile) {
+    const sourceMatch = req.method === "GET" ? SOURCE_ROUTE.exec(url.pathname) : null;
+    const isOriginal = sourceMatch && [...url.searchParams.keys()].length === 3 &&
+      PROJECT_ID.test(url.searchParams.get("projectId") ?? "") && PROJECT_ID.test(url.searchParams.get("snapshotId") ?? "") &&
+      /^[a-f0-9]{64}$/.test(url.searchParams.get("hash") ?? "");
+    if (!isTool && !isFile && !isOriginal) {
       return res.status(404).json({ code: "UNSUPPORTED", error: "Операция адаптера не поддерживается", requestId });
     }
     const token = readAgentToken(req.header("authorization"));
@@ -50,7 +55,7 @@ export function createAstraRouter(options: Options): Router {
         redirect: "error",
         signal: controller.signal,
         headers: {
-          Accept: isFile ? "application/octet-stream, application/json" : "application/json",
+          Accept: isFile || isOriginal ? "application/octet-stream, application/json" : "application/json",
           "Content-Type": "application/json",
           "X-Request-ID": requestId,
           "X-DocGrid-Service-Token": options.serviceToken,
@@ -59,7 +64,8 @@ export function createAstraRouter(options: Options): Router {
         body: isTool ? JSON.stringify(req.body) : undefined,
       });
       const isJson = /^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/i.test(response.headers.get("content-type") ?? "");
-      const binary = isFile && response.ok && !isJson;
+      // JSON can itself be an immutable uploaded original: preserve its bytes.
+      const binary = response.ok && (isOriginal || (isFile && !isJson));
       if (!isJson && !binary) {
         await response.body?.cancel();
         return res.status(502).json({ error: "Неподдерживаемый ответ адаптера", requestId });
@@ -81,6 +87,10 @@ export function createAstraRouter(options: Options): Router {
       } finally { reader?.releaseLock(); }
       if (binary) {
         res.setHeader("X-Content-Type-Options", "nosniff");
+        if (isOriginal) {
+          res.setHeader("Content-Disposition", `attachment; filename="source-${sourceMatch![1]}.bin"`);
+          return res.status(response.status).type("application/octet-stream").send(Buffer.concat(chunks));
+        }
         res.setHeader("Content-Disposition", `attachment; filename="document-v${fileMatch![1]}.${fileMatch![2]}"`);
         return res.status(response.status).type(fileMatch![2] === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document").send(Buffer.concat(chunks));
       }
