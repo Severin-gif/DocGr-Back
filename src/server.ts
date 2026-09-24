@@ -23,9 +23,9 @@ app.use(cors({
   },
 }));
 app.use(express.json({ limit: "2mb", strict: true }));
-// Загрузка исходных материалов: multipart/form-data пробрасывается как есть,
-// лимит согласован с FileInterceptor legal-core (10 МБ на файл) плюс запас на поля формы.
-const MULTIPART_LIMIT = "11mb";
+// Отдельного лимита 10 МБ на файл нет. Верхняя граница multipart равна
+// квоте проекта (500 МБ) плюс небольшой запас на boundary и поле path.
+const MULTIPART_LIMIT = "501mb";
 app.use(express.raw({ type: "multipart/form-data", limit: MULTIPART_LIMIT }));
 
 function requestId(req: Request): string {
@@ -305,10 +305,15 @@ app.use("/api/docgrid", async (req, res, next) => {
 
 app.use((_req, res) => res.status(404).json({ error: "Маршрут не найден" }));
 
-app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
   const known = error as { status?: number; statusCode?: number; type?: string; message?: string };
   if (known.type === "entity.too.large" || known.status === 413) {
-    return res.status(413).json({ error: "Тело запроса превышает 2 МБ" });
+    const multipart = (req.header("content-type") ?? "").toLowerCase().startsWith("multipart/form-data");
+    return res.status(413).json({
+      error: multipart
+        ? "Загрузка превышает общий лимит проекта 500 МБ"
+        : "Тело JSON-запроса превышает 2 МБ",
+    });
   }
   if (known.type === "entity.parse.failed") {
     return res.status(400).json({ error: "Некорректный JSON" });
