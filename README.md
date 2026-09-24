@@ -79,3 +79,30 @@ The first value is a build-time Next.js public variable. Rebuild the frontend af
 The route policy is explicit and method-specific. Requests outside the current GitLaw API are returned as 404. Cookies, provider keys, internal service tokens and arbitrary client headers are not forwarded.
 
 Technical logs include request ID, method, path, upstream status and latency. They do not include document bodies or Bearer tokens.
+
+## Astra direct document adapter (ASTRA-DG-001)
+
+The matching `legal-core` Astra migrations and controller must be released before
+enabling the frontend control page. No new secrets, databases, model providers or
+CODEX Chat transport are introduced in this BFF.
+
+- Agent: `POST /api/docgrid/astra/tools/docgrid_<operation>` with an opaque
+  `Bearer dga_…` grant issued by the project owner. JSON envelope contains
+  `projectId`, `runId`, `traceId`, `requestKey` (mandatory for mutations), and
+  `input`. Discover actual tools and input schemas with `docgrid_get_capabilities`.
+- Owner: `/api/docgrid/repositories/:projectId/astra/catalog`, `/grants`,
+  `/operations` and per-operation `/approve` or `/cancel`, using the existing
+  human DocGrid identity. Approval cannot be performed with an agent credential.
+- Exact agent download: `GET /api/docgrid/astra/artifacts/:artifactId/versions/:version/:format?projectId=:projectId`,
+  where format is `docx` or `pdf`. Bearer is required; tokens are never put in URLs.
+- Exact human article/history/download paths remain under the project-scoped
+  `/repositories/:projectId/astra/artifacts/` namespace.
+
+The agent route forwards only the independently configured server token and the
+opaque grant to the domain adapter. The domain checks live grant revocation,
+project/source scope, expiry, idempotency and operation caps on every request.
+Client cookies, human identity headers and arbitrary URLs never reach this lane.
+Responses are bounded and `no-store`; errors do not include upstream bodies.
+
+`npm test` covers credential separation and the HTTP adapter with a synthetic
+upstream. Production rollout and a real project run remain separate steps.
