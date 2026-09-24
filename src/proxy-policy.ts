@@ -14,6 +14,17 @@ type Rule = {
 export type RouteRule = { body: BodyKind; response: ResponseKind; query?: Set<string> };
 
 const rules: Rule[] = [
+  // Human control plane. Agent credentials are rejected by the identity verifier.
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/catalog$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/grants$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/grants$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/grants/${UUID}/revoke$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/operations$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/operations/${UUID}$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/operations/${UUID}/(?:approve|cancel)$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/artifacts/${UUID}/versions/[1-9][0-9]{0,8}/(?:docx|pdf)$`), response: "binary" },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/artifacts/${UUID}/versions/[1-9][0-9]{0,8}$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/artifacts/${UUID}/history$`) },
   { method: "GET", pattern: /^\/api\/docgrid\/repositories$/ },
   { method: "POST", pattern: /^\/api\/docgrid\/repositories$/ },
   { method: "PUT", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}$`) },

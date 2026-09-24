@@ -6,6 +6,7 @@ import { allowedOrigins, config, legalCoreUrl } from "./config.js";
 import { buildUpstreamUrl, readBearer, resolveDocGridRoute } from "./proxy-policy.js";
 import { trustedIdentityHeaders, verifyDocGridAccessToken } from "./docgrid-identity.js";
 import { buildHomeDashboard, HomeActivity, HomeRepository, parseHomeQuery } from "./home.js";
+import { createAstraRouter } from "./astra-proxy.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -164,6 +165,13 @@ app.get("/api/docgrid/home", async (req, res, next) => {
     return next(error);
   }
 });
+
+app.use("/api/docgrid/astra", createAstraRouter({
+  upstream: legalCoreUrl,
+  serviceToken: config.DOCGRID_SERVICE_TOKEN,
+  timeoutMs: config.UPSTREAM_TIMEOUT_MS,
+  maxResponseBytes: config.MAX_RESPONSE_BYTES,
+}));
 
 app.use("/api/docgrid", async (req, res, next) => {
   const id = requestId(req);
