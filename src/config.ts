@@ -7,6 +7,7 @@ const schema = z.object({
   LEGAL_CORE_URL: z.string().url(),
   CORS_ORIGINS: z.string().default("https://docgrid.ru,https://www.docgrid.ru,http://localhost:3000"),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(90_000),
+  FILE_TRANSFER_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(300_000),
   UPSTREAM_READY_TIMEOUT_MS: z.coerce.number().int().min(500).max(10_000).default(5_000),
   MAX_RESPONSE_BYTES: z.coerce.number().int().min(1_000_000).max(64_000_000).default(32_000_000),
   DOCGRID_IDENTITY_JWT_SECRET: z.string().min(32),

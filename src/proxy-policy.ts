@@ -38,6 +38,7 @@ const rules: Rule[] = [
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/files$`), query: new Set(["trash"]) },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/folders$`) },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/materials$`), body: "multipart" },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/materials/${UUID}/relocate$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/materials/${UUID}/download$`), response: "binary" },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/files/${UUID}/trash$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/members$`) },
