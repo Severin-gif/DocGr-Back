@@ -3,6 +3,7 @@ import { z } from "zod";
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  DOCGRID_PUBLIC_ORIGIN: z.string().url().default("https://api.docgrid.ru"),
   PORT: z.coerce.number().int().positive().max(65535).default(4000),
   LEGAL_CORE_URL: z.string().url(),
   CORS_ORIGINS: z.string().default("https://docgrid.ru,https://www.docgrid.ru,http://localhost:3000"),
@@ -17,6 +18,8 @@ const schema = z.object({
 });
 
 export const config = schema.parse(process.env);
+const publicUrl = new URL(config.DOCGRID_PUBLIC_ORIGIN);
+if (publicUrl.origin !== config.DOCGRID_PUBLIC_ORIGIN || publicUrl.username || publicUrl.password || (publicUrl.protocol !== 'https:' && !(config.NODE_ENV !== 'production' && ['127.0.0.1','localhost'].includes(publicUrl.hostname)))) throw new Error('DOCGRID_PUBLIC_ORIGIN must be a canonical HTTPS origin');
 
 function normalizeLegalCoreUrl(raw: string): string {
   const url = new URL(raw);

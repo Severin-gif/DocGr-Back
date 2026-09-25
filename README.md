@@ -1,3 +1,5 @@
+General LLM/MCP connections: see [docs/llm-access.md](docs/llm-access.md). Astra is a regular connection; its separate audit is not a security role.
+
 # DocGrid Back / BFF
 
 Repository name is historical: `dochub-back`. Its production role is now the public API gateway for **DocGrid**.

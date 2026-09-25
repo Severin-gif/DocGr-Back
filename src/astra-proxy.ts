@@ -10,9 +10,9 @@ type Options = {
   fetcher?: typeof fetch;
 };
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
-const FILE_ROUTE = new RegExp(`^/api/docgrid/astra/artifacts/${UUID}/versions/([1-9][0-9]{0,8})/(docx|pdf)$`);
+const FILE_ROUTE = new RegExp(`^/api/docgrid/(?:agents|astra)/artifacts/${UUID}/versions/([1-9][0-9]{0,8})/(docx|pdf)$`);
 const PROJECT_ID = new RegExp(`^${UUID}$`);
-const SOURCE_ROUTE = new RegExp(`^/api/docgrid/astra/sources/(${UUID})/original$`);
+const SOURCE_ROUTE = new RegExp(`^/api/docgrid/(?:agents|astra)/sources/(${UUID})/original$`);
 
 // This credential can enter only the agent adapter. It never becomes a human
 // identity and cannot reach the browser proxy or human approval endpoints.
@@ -29,7 +29,7 @@ export function createAstraRouter(options: Options): Router {
     res.setHeader("X-Request-ID", requestId);
     res.setHeader("Cache-Control", "no-store");
     const url = new URL(req.originalUrl, "https://docgrid.invalid");
-    const isTool = req.method === "POST" && /^\/api\/docgrid\/astra\/tools\/docgrid_[a-z_]{1,64}$/.test(url.pathname) && !url.search;
+    const isTool = req.method === "POST" && /^\/api\/docgrid\/(?:agents|astra)\/tools\/docgrid_[a-z_]{1,64}$/.test(url.pathname) && !url.search;
     const fileMatch = req.method === "GET" ? FILE_ROUTE.exec(url.pathname) : null;
     const isFile = fileMatch && [...url.searchParams.keys()].length === 1 && PROJECT_ID.test(url.searchParams.get("projectId") ?? "");
     const sourceMatch = req.method === "GET" ? SOURCE_ROUTE.exec(url.pathname) : null;
@@ -40,7 +40,7 @@ export function createAstraRouter(options: Options): Router {
       return res.status(404).json({ code: "UNSUPPORTED", error: "Операция адаптера не поддерживается", requestId });
     }
     const token = readAgentToken(req.header("authorization"));
-    if (!token) return res.status(401).json({ code: "INVALID_AGENT_GRANT", error: "Требуется отдельный доступ Astra к DocGrid", requestId });
+    if (!token) return res.status(401).json({ code: "INVALID_AGENT_GRANT", error: "Требуется ключ подключения к DocGrid", requestId });
     if (isTool && !req.is("application/json")) return res.status(415).json({ error: "Ожидается application/json", requestId });
     if (isTool && (!req.body || typeof req.body !== "object" || Array.isArray(req.body))) {
       return res.status(400).json({ error: "Ожидается объект запроса", requestId });
