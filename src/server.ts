@@ -1,3 +1,5 @@
+import { createAgentMcpRouter } from './agent-mcp.js';
+import { createAgentOAuthRouter } from './agent-oauth.js';
 import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -20,10 +22,10 @@ app.use(helmet());
 app.use(cors({
   credentials: false,
   methods: ["GET", "POST", "PUT", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type", "X-Request-ID"],
+  allowedHeaders: ["Authorization", "Content-Type", "X-Request-ID", "MCP-Protocol-Version"],
   exposedHeaders: ["X-Request-ID"],
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin || (allowedOrigins.includes(origin) || origin === config.DOCGRID_PUBLIC_ORIGIN)) return callback(null, true);
     return callback(Object.assign(new Error("Origin is not allowed"), { status: 403 }));
   },
 }));
@@ -166,7 +168,14 @@ app.get("/api/docgrid/home", async (req, res, next) => {
   }
 });
 
-app.use("/api/docgrid/astra", createAstraRouter({
+const agentOptions = {
+  upstream: legalCoreUrl, serviceToken: config.DOCGRID_SERVICE_TOKEN,
+  timeoutMs: config.UPSTREAM_TIMEOUT_MS, maxResponseBytes: config.MAX_RESPONSE_BYTES,
+  publicOrigin: config.DOCGRID_PUBLIC_ORIGIN, allowedOrigins: [...allowedOrigins, config.DOCGRID_PUBLIC_ORIGIN],
+};
+app.use(createAgentOAuthRouter(agentOptions));
+app.use("/api/docgrid/mcp", createAgentMcpRouter(agentOptions));
+app.use(["/api/docgrid/agents", "/api/docgrid/astra"], createAstraRouter({
   upstream: legalCoreUrl,
   serviceToken: config.DOCGRID_SERVICE_TOKEN,
   timeoutMs: config.UPSTREAM_TIMEOUT_MS,

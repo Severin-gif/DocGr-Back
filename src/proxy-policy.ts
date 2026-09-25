@@ -14,17 +14,18 @@ type Rule = {
 export type RouteRule = { body: BodyKind; response: ResponseKind; query?: Set<string> };
 
 const rules: Rule[] = [
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/artifacts$`), query: new Set(["cursor"]) },
   // Human control plane. Agent credentials are rejected by the identity verifier.
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/catalog$`) },
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/grants$`) },
-  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/grants$`) },
-  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/grants/${UUID}/revoke$`) },
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/operations$`) },
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/operations/${UUID}$`) },
-  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/operations/${UUID}/(?:approve|cancel)$`) },
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/artifacts/${UUID}/versions/[1-9][0-9]{0,8}/(?:docx|pdf)$`), response: "binary" },
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/artifacts/${UUID}/versions/[1-9][0-9]{0,8}$`) },
-  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/astra/artifacts/${UUID}/history$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/catalog$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/grants$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/grants$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/grants/${UUID}/revoke$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/operations$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/operations/${UUID}$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/operations/${UUID}/(?:approve|cancel)$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/artifacts/${UUID}/versions/[1-9][0-9]{0,8}/(?:docx|pdf)$`), response: "binary" },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/artifacts/${UUID}/versions/[1-9][0-9]{0,8}$`) },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/artifacts/${UUID}/history$`) },
   { method: "GET", pattern: /^\/api\/docgrid\/repositories$/ },
   { method: "POST", pattern: /^\/api\/docgrid\/repositories$/ },
   { method: "PUT", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}$`) },
@@ -77,6 +78,7 @@ export function resolveDocGridRoute(method: string, pathname: string, searchPara
   for (const [key, value] of searchParams.entries()) {
     if (!rule.query?.has(key) || seen.has(key)) return null;
     seen.add(key);
+    if (key === "cursor" && !new RegExp(`^${UUID}$`).test(value)) return null;
     if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) return null;
     if (key === "trash" && value !== "true" && value !== "false") return null;
   }
