@@ -18,7 +18,7 @@ export function createAgentOAuthRouter(options: AgentTransportOptions): Router {
     const resource = text(raw, 2048), url = new URL(resource);
     const match = resourcePattern.exec(url.pathname);
     if (url.origin !== base || url.search || url.hash || !match || url.username || url.password) throw Error('Invalid resource');
-    return { resource, projectId: match[1]! };
+    return { resource: url.origin + url.pathname, projectId: match[1]! };
   };
   router.use((req, res, next) => {
     if (req.path.includes('/oauth') || req.path.startsWith('/.well-known/')) {
@@ -50,19 +50,28 @@ export function createAgentOAuthRouter(options: AgentTransportOptions): Router {
     } catch { return res.status(400).json({ error: 'invalid_client_metadata' }); }
   });
   router.get('/api/docgrid/oauth/authorize', (req, res) => {
+    let callback: URL | undefined;
+    let oauthError = 'invalid_request';
     try {
       const q = req.query;
       const clientId = text(q.client_id), client = unseal(options.serviceToken, 'client', clientId);
       const redirect = text(q.redirect_uri, 2048);
+      if (!client.redirects.includes(redirect)) throw Error();
+      callback = new URL(redirect);
+      if (q.state) callback.searchParams.set('state', text(q.state, 2048));
+      if (q.response_type !== 'code') { oauthError = 'unsupported_response_type'; throw Error(); }
+      if (q.scope && q.scope !== 'docgrid') { oauthError = 'invalid_scope'; throw Error(); }
       const { resource, projectId } = projectOf(q.resource);
-      if (!client.redirects.includes(redirect) || q.response_type !== 'code' || q.code_challenge_method !== 'S256' ||
-        !/^[A-Za-z0-9_-]{43}$/.test(text(q.code_challenge, 43)) || (q.scope && q.scope !== 'docgrid')) throw Error();
+      if (q.code_challenge_method !== 'S256' || !/^[A-Za-z0-9_-]{43}$/.test(text(q.code_challenge, 43))) throw Error();
       const nonce = randomBytes(24).toString('base64url');
       const consent: Consent = { clientId, redirect, resource, projectId, challenge: String(q.code_challenge), state: q.state ? text(q.state, 2048) : '', name: String(client.name), nonce, exp: Date.now() + 600000 };
       const ticket = seal(options.serviceToken, 'consent', consent);
       res.cookie('dg_oauth_csrf', nonce, { httpOnly: true, secure: base.startsWith('https:'), sameSite: 'lax', path: '/api/docgrid/oauth', maxAge: 600000 });
       return res.type('html').send(`<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Подключение к DocGrid</title><main><h1>Подключение к DocGrid</h1><p>Приложение: <strong>${esc(consent.name)}</strong></p><p>Адрес возврата: <strong>${esc(new URL(redirect).origin)}</strong></p><p>Проект: ${esc(projectId)}</p><p>В DocGrid откройте проект → Доступ → Подключения LLM. Создайте подключение с нужными правами и введите его ключ ниже. Приложение получит только уже разрешённые этому ключу действия и документы.</p><form method="post" action="${oauth}/authorize"><input type="hidden" name="ticket" value="${esc(ticket)}"><label>Ключ подключения DocGrid <input name="grant" type="password" required autocomplete="off" maxlength="47"></label><p><button name="decision" value="allow">Подключить приложение</button> <button name="decision" value="deny" formnovalidate>Отмена</button></p></form><p>Доступ можно отозвать в проекте. Имя приложения сообщено самим приложением: проверьте адрес возврата.</p></main></html>`);
-    } catch { return res.status(400).json({ error: 'invalid_request' }); }
+    } catch {
+      if (callback) { callback.searchParams.set('error', oauthError); return res.redirect(303, callback.toString()); }
+      return res.status(400).json({ error: 'invalid_request' });
+    }
   });
   router.post('/api/docgrid/oauth/authorize', express.urlencoded({ extended: false, limit: '24kb' }), async (req, res) => {
     try {
@@ -100,7 +109,9 @@ export function createAgentOAuthRouter(options: AgentTransportOptions): Router {
       const stored = await agentJson(options, '/api/docgrid/internal/agent-oauth/exchange', undefined, { codeHash: hash(code), bindingHash });
       const access = unseal(options.serviceToken, 'access', stored.sealedToken);
       if (access.resource !== resource || access.clientId !== clientId) throw Error();
-      await agentJson(options, `/api/docgrid/agents/catalog?projectId=${projectId}`, access.grant);
+      // Consent checked the grant before issuing this code. Do not make another
+      // fallible request after consuming it: every MCP request checks the live
+      // grant, so this token never bypasses revocation, expiry or project scope.
       return res.json({ access_token: `dgmc_${stored.sealedToken}`, token_type: 'Bearer', expires_in: Math.max(0, Math.floor((access.exp - Date.now()) / 1000)), scope: 'docgrid' });
     } catch { return res.status(400).json({ error: 'invalid_grant' }); }
   });

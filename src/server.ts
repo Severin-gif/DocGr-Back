@@ -23,7 +23,7 @@ app.use(cors({
   credentials: false,
   methods: ["GET", "POST", "PUT", "OPTIONS"],
   allowedHeaders: ["Authorization", "Content-Type", "X-Request-ID", "MCP-Protocol-Version"],
-  exposedHeaders: ["X-Request-ID"],
+  exposedHeaders: ["X-Request-ID", "WWW-Authenticate"],
   origin(origin, callback) {
     if (!origin || (allowedOrigins.includes(origin) || origin === config.DOCGRID_PUBLIC_ORIGIN)) return callback(null, true);
     return callback(Object.assign(new Error("Origin is not allowed"), { status: 403 }));

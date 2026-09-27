@@ -41,6 +41,11 @@ test('real gateway forwards multipart bytes and streams >32 MiB downloads behind
     const body = Buffer.from(JSON.stringify({sub:'synthetic-user',email:'user@example.test',role:'USER',plan:'pro',typ:'docgrid_access',iss:'ai-orchestra',aud:'legal-core-docgrid',iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+300})).toString('base64url');
     const token = `${header}.${body}.${createHmac('sha256','a'.repeat(64)).update(`${header}.${body}`).digest('base64url')}`;
     const id='123e4567-e89b-42d3-a456-426614174000';
+    const challenge=await fetch(`http://127.0.0.1:${port}/api/docgrid/mcp/${id}`,{method:'POST',headers:{Origin:'https://docgrid.ru','Content-Type':'application/json'},body:'{}'});
+    assert.equal(challenge.status,401);
+    assert.equal(challenge.headers.get('access-control-allow-origin'),'https://docgrid.ru');
+    assert.match(challenge.headers.get('access-control-expose-headers') || '',/WWW-Authenticate/i);
+    assert.match(challenge.headers.get('www-authenticate') || '',/resource_metadata=/);
     const url=`http://127.0.0.1:${port}/api/docgrid/repositories/${id}/materials`;
     const multipart=Buffer.from('--fixture\r\nContent-Disposition: form-data; name="path"\r\n\r\n/Дело/Суд\r\n--fixture\r\nContent-Disposition: form-data; name="file"; filename="proof.txt"\r\nContent-Type: text/plain\r\n\r\nOriginal\r\n--fixture--\r\n');
     const response=await fetch(url,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'multipart/form-data; boundary=fixture'},body:multipart});
