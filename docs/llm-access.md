@@ -18,7 +18,7 @@ The consent page asks the user for an existing scoped DocGrid connection key fro
 the project's Access section. It does not accept a platform password or create
 broader permissions. No provider/model API key is needed by DocGrid.
 
-OAuth codes are stored in Legal Core and consumed atomically once. Code payloads
+OAuth codes are stored in the Doc-Back database and consumed atomically once. Code payloads
 and issued access tokens are encrypted with purpose-separated keys derived from
 the existing server secret. Codes bind client, redirect, resource and PKCE.
 The original grant remains authoritative for expiry, revocation and scope.
@@ -26,7 +26,7 @@ Refresh grants are not advertised or supported in this version. Reauthorization
 is needed on expiry. Rotating `DOCGRID_SERVICE_TOKEN` invalidates OAuth client
 registrations and access tokens; direct project grants remain in the domain DB.
 
-Deploy Legal Core's common routes and `20260925121500_docgrid_agent_oauth`
+Deploy the standalone Doc-Back routes and `20260925121500_docgrid_agent_oauth`
 migration before this gateway, and the updated frontend last. The public origin
 defaults to the existing `https://api.docgrid.ru`, configurable with
 `DOCGRID_PUBLIC_ORIGIN`. Do not expose the internal code-store routes through
@@ -36,3 +36,4 @@ the general proxy. No new database is created in Doc-Back.
 replayed code, forged consent, revoked grant, filtered discovery, project binding,
 unchanged retry keys and isolation from human approval. Actual client registration
 and a production operation are separate release checks.
+

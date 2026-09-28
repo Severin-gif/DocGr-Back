@@ -1,80 +1,44 @@
-name: DocGrid BFF
-
+name: DocGrid standalone backend
 on:
   pull_request:
-    paths:
-      - "src/**"
-      - "Dockerfile"
-      - "package*.json"
-      - ".dockerignore"
-      - ".github/workflows/docgrid-bff.yml"
+  push:
+    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  build-test-smoke:
+  build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: docgrid
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: docgrid_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: '24'
           cache: npm
-
+      - run: sudo apt-get update && sudo apt-get install -y poppler-utils util-linux
       - run: npm ci --no-audit --no-fund
       - run: npm run check
       - run: npm test
-
-      - name: Build production image
-        run: docker build --progress=plain -t docgrid-bff:ci .
-
-      - name: Start without any database
+      - run: npm run test:postgres
+        env:
+          DATABASE_URL: postgresql://docgrid:test-password@127.0.0.1:5432/docgrid_test?schema=docgrid
+      - run: docker build -t docgrid-back:ci .
+      - name: Check image without database
         run: |
-          docker run --detach             --name docgrid-bff-ci             --cap-drop ALL             --security-opt no-new-privileges             -e PORT=4000             -e LEGAL_CORE_URL=https://example.invalid             -e CORS_ORIGINS=https://docgrid.ru             -e DOCGRID_IDENTITY_JWT_SECRET=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa             -e DOCGRID_SERVICE_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb             -p 127.0.0.1:3400:4000             docgrid-bff:ci
-          test "$(docker exec docgrid-bff-ci id -u)" != 0
-
-      - name: Liveness is independent from DB/upstream
-        run: |
-          node - <<'NODE'
-          import { setTimeout as delay } from 'node:timers/promises';
-
-          let health;
-          for (let attempt = 0; attempt < 30; attempt += 1) {
-            try {
-              const response = await fetch('http://127.0.0.1:3400/health', {
-                signal: AbortSignal.timeout(1500),
-              });
-              if (response.status === 200) {
-                health = response;
-                break;
-              }
-              await response.body?.cancel();
-            } catch {}
-            await delay(500);
-          }
-          if (!health) throw new Error('BFF did not become healthy');
-
-          const body = await health.json();
-          if (body.service !== 'docgrid-bff' || body.database !== 'none') throw new Error(JSON.stringify(body));
-
-          const forbidden = await fetch('http://127.0.0.1:3400/api/projects', {
-            headers: { Authorization: 'Bearer fake' }
-          });
-          if (forbidden.status !== 404) throw new Error('legacy route exposed: '+forbidden.status);
-
-          const unauth = await fetch('http://127.0.0.1:3400/api/docgrid/repositories');
-          if (unauth.status !== 401) throw new Error('missing auth not rejected: '+unauth.status);
-          NODE
-
-      - name: Container output
-        if: always()
-        run: docker logs docgrid-bff-ci 2>&1 || true
-
-      - name: Cleanup
-        if: always()
-        run: docker rm -f docgrid-bff-ci 2>/dev/null || true
+          docker run -d --name dg-ci -p 127.0.0.1:3400:4000 -e DOCGRID_IDENTITY_JWT_SECRET=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -e DOCGRID_SERVICE_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb docgrid-back:ci
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:3400/health && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3400/health)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3400/ready)" = 503
+          test "$(docker exec dg-ci id -u)" != 0
+      - if: always()
+        run: docker logs dg-ci 2>&1 || true

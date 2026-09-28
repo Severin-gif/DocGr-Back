@@ -3,13 +3,12 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 
 process.env.NODE_ENV = "test";
-process.env.LEGAL_CORE_URL = "https://sps.codex-chat.ru";
 process.env.DOCGRID_IDENTITY_JWT_SECRET = "a".repeat(64);
 process.env.DOCGRID_SERVICE_TOKEN = "b".repeat(64);
 process.env.DOCGRID_IDENTITY_ISSUER = "ai-orchestra";
 process.env.DOCGRID_IDENTITY_AUDIENCE = "legal-core-docgrid";
 
-const { verifyDocGridAccessToken, trustedIdentityHeaders } = await import("./docgrid-identity.js");
+const { verifyDocGridAccessToken, trustedIdentityHeaders } = require("./docgrid-identity.js");
 
 function sign(payload: Record<string, unknown>, secret = process.env.DOCGRID_IDENTITY_JWT_SECRET!) {
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
@@ -61,3 +60,4 @@ test("rejects expired or wrong-audience identity tokens", () => {
     /invalid_claims/,
   );
 });
+
