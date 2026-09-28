@@ -178,6 +178,19 @@ export class AstraService {
     return unsupported(tool);
   }
   async execute(token:string,tool:string,raw:unknown) {
+    return this.executeAuthorized(tool,raw,(tx,projectId,mutation)=>this.authorizedGrant(tx,token,projectId,tool,mutation));
+  }
+  // Built-in LLM uses the same grant checks, budget, ledger and approval dispatcher as MCP.
+  async executeForUser(ownerId:string,grantId:string,tool:string,raw:unknown) {
+    return this.executeAuthorized(tool,raw,async(tx,projectId,mutation)=>{
+      await this.requireProject(tx,ownerId,projectId,'owner');
+      const grant=await this.grantById(tx,grantId);
+      if(grant.ownerId!==ownerId)throw new ForbiddenException('Grant owner mismatch');
+      await this.requireProject(tx,ownerId,projectId,mutation?'write':'read');
+      this.assertGrant(grant,projectId,tool); return grant;
+    });
+  }
+  private async executeAuthorized(tool:string,raw:unknown,authorize:(tx:AstraDb,projectId:string,mutation:boolean)=>Promise<Grant>) {
     if(!this.tools().includes(tool))unsupported(tool);
     const body=objectInput(raw);assertKeys(body,['projectId','runId','requestKey','traceId','input']);
     if(Buffer.byteLength(canonical(body))>1048576)throw new BadRequestException('Input exceeds 1 MiB');
@@ -185,7 +198,7 @@ export class AstraService {
     const mutation=this.isMutation(tool,input),requestKey=stringInput(body,'requestKey',120,mutation)||randomUUID();
     const bodyDigest=digest({projectId,runId,tool,input});
     const operation=await this.prisma.$transaction(async tx=>{
-      const grant=await this.authorizedGrant(tx,token,projectId,tool,mutation);
+      const grant=await authorize(tx,projectId,mutation);
       const existing=await tx.$queryRaw<{id:string;bodyDigest:string}[]>`SELECT id,body_digest AS "bodyDigest" FROM docgrid.dg_astra_operations WHERE grant_id=${grant.id}::uuid AND request_key=${requestKey}`;
       if(existing[0]){if(existing[0].bodyDigest!==bodyDigest)throw new ConflictException('requestKey already used with a different body');const cached=await this.operation(tx,projectId,existing[0].id);this.assertGrant(grant,projectId,tool);return cached;}
       if(grant.usedOperations>=grant.maxOperations)throw new ForbiddenException({code:'BUDGET_EXHAUSTED',message:'Grant operation budget exhausted'});

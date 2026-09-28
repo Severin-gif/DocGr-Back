@@ -885,7 +885,8 @@ export class DocGridService {
     const materials=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,mime,byte_size AS size,sha256,extraction_status AS "extractionStatus",created_at AS "createdAt",deleted_at AS "deletedAt" FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND (deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
     const documents=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,docgrid_deleted_at AS "deletedAt" FROM docgrid.workspace_documents WHERE project_id=${projectId}::uuid AND (docgrid_deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
     const folders=await this.prisma.$queryRaw<any[]>`SELECT id,path FROM docgrid.docgrid_folders WHERE project_id=${projectId}::uuid ORDER BY path`;
-    return {materials,documents,folders};
+    const artifacts=trash?[]:await this.prisma.$queryRaw<any[]>`SELECT d.id,d.title,b.path,d.current_version AS version FROM docgrid.dg_astra_documents b JOIN docgrid.prepared_legal_documents d ON d.id=b.document_id WHERE b.project_id=${projectId}::uuid ORDER BY b.path,d.title`;
+    return {materials,documents,folders,artifacts};
   }
 
   private async ensureFolders(tx: Db, projectId: string, path: string) {
