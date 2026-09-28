@@ -1,0 +1,54 @@
+const assert=require('node:assert/strict');
+const {createServer}=require('node:http');
+const {randomUUID}=require('node:crypto');
+module.exports=async function({call,prefix,p,material,jwt,db}){
+ let task='sort',calls=0;
+ const server=createServer(async(req,res)=>{
+  let body='';for await(const c of req)body+=c;
+  const input=JSON.parse(body);calls++;assert.equal(req.headers['x-docgrid-service-token'],'b'.repeat(64));
+  const s=input.sources.find(s=>s.id===material.id);
+  const result={answer:'Проверено по тексту',warnings:[],classifications:[],package:null};
+  if(task==='sort')result.classifications=[{sourceId:s.id,category:'Доказательства',destination:'/Разобрано',reason:'Подтверждено текстом',confidence:'high',evidence:[{sourceId:s.id,quote:'Original evidence'}]}];
+  if(task==='package')result.package={folder:'/Дебиторка/ООО Ромашка',documents:[{title:'Иск — черновик',text:'Обстоятельства: Original evidence. [ТРЕБУЕТСЯ: сумма долга, договор и надлежащий суд]'}],sourceIds:[s.id],missingData:['Подтвердить стороны и сумму долга'],payment:[{field:'Получатель',value:null,evidence:[]}]};
+  if(task==='bad')result.classifications=[{sourceId:s.id,category:'X',destination:'/X',reason:'X',confidence:'high',evidence:[{sourceId:s.id,quote:'invented quote'}]}];
+  res.setHeader('content-type','application/json');res.end(JSON.stringify({result,model:'acceptance-stub',usage:{total_tokens:5}}));
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ process.env.DOCGRID_ORCHESTRA_URL='http://127.0.0.1:'+server.address().port;
+ try{
+  const catalog=await call(prefix+'/agents/catalog');
+  const grant=await call(prefix+'/agents/grants','POST',{requestKey:randomUUID(),agentRef:'built-in-test',actions:catalog.tools.map(t=>t.name),expiresAt:new Date(Date.now()+3600000).toISOString(),maxOperations:150},jwt('owner'),201);
+  const thread=await call(prefix+'/discussions','POST',{title:'Проверка сортировки',grantId:grant.grant.id},jwt('owner'),201);
+  const root=prefix+'/discussions/'+thread.id;
+  await call(root+'/turns','GET',undefined,jwt('stranger'),404);
+  const send=(extra={},status=201)=>call(root+'/turns','POST',{requestKey:randomUUID(),instruction:'Разбери документы',mode:'helper',task:'sort',sourceIds:[material.id],...extra},jwt('owner'),status);
+  const requestKey=randomUUID();const sent=await send({requestKey});
+  const repeated=await send({requestKey});assert.equal(sent.id,repeated.id);assert.equal(calls,1);
+  const turns=await call(root+'/turns');assert.equal(turns[0].context.total,1);assert.equal(turns[0].result.classifications[0].sourceId,material.id);
+  const proposed=await call(root+'/turns/'+sent.id+'/proposal','POST',{},jwt('owner'),201);
+  assert.equal(proposed.status,'needs_user_action');
+  assert.equal((await call(prefix+'/files')).materials.find(m=>m.id===material.id).path,'/Case/Nested');
+  await call(prefix+'/agents/operations/'+proposed.id+'/approve','POST',{requestKey:randomUUID(),approvalDigest:proposed.approvalDigest},jwt('owner'),201);
+  assert.equal((await call(prefix+'/files')).materials.find(m=>m.id===material.id).path,'/Разобрано');
+  // Stale tree must fail atomically, without moving sources.
+  const stale=await send();const staleOp=await call(root+'/turns/'+stale.id+'/proposal','POST',{},jwt('owner'),400); // already in target: no move
+  assert.ok(staleOp);
+  const advisor=await send({mode:'advisor'});await call(root+'/turns/'+advisor.id+'/proposal','POST',{},jwt('owner'),400);
+  const before=calls;await send({sourceIds:[randomUUID()]},400);assert.equal(calls,before);
+  task='package';const packet=await send({task:'package'});
+  const pack=await call(root+'/turns/'+packet.id+'/proposal','POST',{},jwt('owner'),201);assert.equal(pack.result.documents.length,2);
+  await call(prefix+'/folders','POST',{path:'/Changed'},jwt('owner'),201);
+  await call(prefix+'/agents/operations/'+pack.id+'/approve','POST',{requestKey:randomUUID(),approvalDigest:pack.approvalDigest},jwt('owner'),409);
+  assert.equal((await call(prefix+'/files')).artifacts.length,0);
+  const fresh=await send({task:'package'}),freshPack=await call(root+'/turns/'+fresh.id+'/proposal','POST',{},jwt('owner'),201);
+  const accepted=await call(prefix+'/agents/operations/'+freshPack.id+'/approve','POST',{requestKey:randomUUID(),approvalDigest:freshPack.approvalDigest},jwt('owner'),201);
+  assert.equal(accepted.result.artifacts.length,2);
+  const tree=await call(prefix+'/files');assert.equal(tree.artifacts.length,2);assert.equal(tree.materials.find(m=>m.id===material.id).path,'/Дебиторка/ООО Ромашка/Приложения');
+  assert.ok(tree.artifacts.every(a=>a.path==='/Дебиторка/ООО Ромашка'));
+  const id=tree.artifacts[0].id;const draft=await call(prefix+'/agents/artifacts/'+id+'/versions/1');assert.ok(draft.plainText.includes('Черновик'));
+  task='bad';await send({},502);assert.equal((await call(root+'/turns')).at(-1).status,'failed');
+  await call(prefix+'/agents/grants/'+grant.grant.id+'/revoke','POST',{requestKey:randomUUID()},jwt('owner'),201);
+  await send({},403);
+  console.log('PASS discussions: ACL, idempotent sends, evidence quotes, reviewed moves, advisor boundary, stale package rollback, draft package + attachments + payment gaps, grant revocation');
+ }finally{await new Promise(resolve=>server.close(resolve));delete process.env.DOCGRID_ORCHESTRA_URL;}
+};

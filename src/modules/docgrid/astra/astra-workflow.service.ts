@@ -1,3 +1,4 @@
+import { normalizedPath } from './astra-source-domain';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
@@ -10,7 +11,7 @@ import {
 } from './astra.contracts';
 
 export const ASTRA_WORKFLOW_TOOLS = [
-  'docgrid_plan_document', 'docgrid_submit_document', 'docgrid_propose_patch',
+  'docgrid_propose_package', 'docgrid_plan_document', 'docgrid_submit_document', 'docgrid_propose_patch',
   'docgrid_restore_version', 'docgrid_export_version', 'docgrid_get_artifact',
   'docgrid_get_history', 'docgrid_compare_versions',
 ] as const;
@@ -36,6 +37,7 @@ export class AstraWorkflowService {
 
   async execute(tx: AstraDb, ctx: AstraContext, tool: string, input: Record<string, unknown>): Promise<AstraDomainResult> {
     switch (tool) {
+      case 'docgrid_propose_package': return this.proposePackage(tx,ctx,input);
       case 'docgrid_plan_document': return this.plan(tx, ctx, input);
       case 'docgrid_submit_document': return this.submit(tx, ctx, input);
       case 'docgrid_propose_patch': return this.propose(tx, ctx, input, false);
@@ -53,6 +55,7 @@ export class AstraWorkflowService {
 
   /** Called exclusively by the human approval dispatcher; never exposed as an agent tool. */
   async approve(tx: AstraDb, ctx: AstraContext, operation: AstraOperation, _input: Record<string, unknown>): Promise<AstraDomainResult> {
+    if(operation.tool==='docgrid_propose_package')return this.approvePackage(tx,ctx,operation);
     const approval = objectInput(operation.approval);
     if (operation.tool === 'docgrid_plan_document') {
       const binding = await this.binding(tx, ctx, uuidInput(approval, 'taskId'));
@@ -103,6 +106,51 @@ export class AstraWorkflowService {
         WHERE id=${uuidInput(approval, 'proposalId')}::uuid AND project_id=${ctx.projectId}::uuid AND status='PROPOSED'`;
       if (changed !== 1) throw new ConflictException('Proposal cannot be cancelled');
     }
+  }
+
+  private async proposePackage(tx: AstraDb, ctx: AstraContext, input: Record<string, unknown>): Promise<AstraDomainResult> {
+    assertKeys(input,['baseTreeRevision','folder','documents','sourceSnapshotId','sourceRefs','attachmentIds','missingData']);
+    if(ctx.allowedSourceIds!==null)throw new BadRequestException('PROJECT_SCOPE_REQUIRED_FOR_FOLDERS');
+    const folder=normalizedPath(input.folder);
+    if(folder==='/')throw new BadRequestException('Choose a package folder');
+    if(!Array.isArray(input.documents)||!input.documents.length||input.documents.length>8)throw new BadRequestException('Invalid package documents');
+    const documents=input.documents.map(v=>this.normalizeContent(v));
+    if(new Set(documents.map(d=>d.title)).size!==documents.length)throw new BadRequestException('Duplicate titles');
+    const snapshotId=uuidInput(input,'sourceSnapshotId');
+    const sourceRefs=await this.sources.validateSourceRefs(tx,ctx,snapshotId,input.sourceRefs);
+    if(!Array.isArray(input.attachmentIds)||input.attachmentIds.length>20)throw new BadRequestException('Invalid attachments');
+    const attachmentIds=[...new Set(input.attachmentIds.map(id=>uuidInput({id},'id')))];
+    if(attachmentIds.some(id=>!sourceRefs.some(r=>r.sourceId===id)))throw new BadRequestException('Attachment not in reviewed sources');
+    const missingData=this.strings(input.missingData,'missingData',60,2000);
+    const folders=await tx.$queryRaw<Array<{path:string}>>`SELECT path FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid`;
+    const existing=new Set(folders.map(f=>f.path)),changes:Array<Record<string,unknown>>=[];
+    const destination=folder+'/Приложения';
+    const parts=destination.split('/').filter(Boolean);
+    for(let i=1;i<=parts.length;i++){const path='/'+parts.slice(0,i).join('/');if(!existing.has(path))changes.push({action:'create_folder',path});}
+    for(const sourceId of attachmentIds)changes.push({action:'move_source',sourceId,path:destination});
+    // A non-empty structure proposal binds this package to the live tree and rejects stale approval.
+    if(!changes.length)throw new ConflictException('Package folder already exists without new attachments; choose a new folder');
+    const structure=await this.sources.execute(tx,ctx,'docgrid_propose_structure',{baseTreeRevision:input.baseTreeRevision,changes});
+    const approval={folder,documents,sourceSnapshotId:snapshotId,sourceRefs,missingData,structure:structure.approval};
+    return {status:'needs_user_action',approval,output:{kind:'package',status:'DRAFT',...approval,attachmentIds}};
+  }
+
+  private async approvePackage(tx:AstraDb,ctx:AstraContext,operation:AstraOperation):Promise<AstraDomainResult>{
+    const a=objectInput(operation.approval);
+    await this.sources.validateSourceRefs(tx,ctx,a.sourceSnapshotId as string,a.sourceRefs);
+    await this.sources.approve(tx,ctx,{...operation,tool:'docgrid_propose_structure',approval:a.structure},{});
+    const artifacts=[];
+    for(const content of a.documents as CanonicalDocument[]){
+      const planned=await this.plan(tx,ctx,{purpose:'Подготовить согласованный комплект документов',requestedResult:content.title,
+        plan:{title:content.title,documentType:'draft',goal:'Черновик для проверки пользователем',sections:content.sections.map(s=>s.heading||content.title),missingData:a.missingData},sourceSnapshotId:a.sourceSnapshotId,sourceRefs:a.sourceRefs});
+      const plan=objectInput(planned.approval);
+      await this.approve(tx,ctx,{...operation,tool:'docgrid_plan_document',approval:plan},{});
+      const submitted=await this.submit(tx,ctx,{taskId:plan.taskId,planRevision:plan.planRevision,planDigest:plan.planDigest,content});
+      const artifact=objectInput(submitted.output);
+      await tx.$executeRaw`UPDATE docgrid.dg_astra_documents SET path=${a.folder as string} WHERE document_id=${artifact.artifactId as string}::uuid AND project_id=${ctx.projectId}::uuid`;
+      artifacts.push(artifact);
+    }
+    return {output:{kind:'package',status:'DRAFT',folder:a.folder,artifacts,missingData:a.missingData,externalActions:false}};
   }
 
   private async plan(tx: AstraDb, ctx: AstraContext, input: Record<string, unknown>): Promise<AstraDomainResult> {
@@ -444,6 +492,7 @@ const contentSchema = { type: 'object', additionalProperties: false, required: [
 } };
 const schema = (required: string[], properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required, properties });
 export const ASTRA_WORKFLOW_SCHEMAS: Record<string, { description: string; inputSchema: unknown }> = {
+  docgrid_propose_package: {description:'Propose a reviewed folder, source attachments and draft documents; human approval applies them atomically. No sending or payments.',inputSchema:{type:'object',additionalProperties:false,required:['baseTreeRevision','folder','documents','sourceSnapshotId','sourceRefs','attachmentIds','missingData'],properties:{baseTreeRevision:{type:'string'},folder:{type:'string'},documents:{type:'array',maxItems:8,items:{type:'object'}},sourceSnapshotId:{type:'string',format:'uuid'},sourceRefs:{type:'array',items:{type:'object'}},attachmentIds:{type:'array',maxItems:20,items:{type:'string',format:'uuid'}},missingData:{type:'array',items:{type:'string'}}}}},
   docgrid_plan_document: { description: 'Save a metadata-only plan; human approval binds its digest, scope and revision before content or files can exist.',
     inputSchema: schema(['purpose', 'requestedResult', 'plan', 'sourceSnapshotId', 'sourceRefs'], {
       taskId: uuidSchema, basePlanRevision: versionSchema, purpose: { type: 'string', maxLength: 8000 }, requestedResult: { type: 'string', maxLength: 2000 },
