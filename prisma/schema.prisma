@@ -1,0 +1,389 @@
+generator client {
+ provider = "prisma-client-js"
+ previewFeatures = ["multiSchema"]
+ binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+datasource db {
+ provider = "postgresql"
+ url = env("DATABASE_URL")
+ schemas = ["docgrid"]
+}
+
+model User {
+  id                 String              @id
+  email              String              @unique
+  passwordHash       String
+  name               String?
+  role               UserRole            @default(USER)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime
+  tariff             String              @default("FREE")
+  plan               String              @default("free")
+  emailVerifiedAt    DateTime?
+  lastLoginAt        DateTime?
+  identityProvider   String?              @map("identity_provider") @db.VarChar(32)
+  externalSubject    String?              @map("external_subject") @db.VarChar(128)
+  localLoginDisabled Boolean              @default(false) @map("local_login_disabled")
+  workspaceProjects WorkspaceProject[]         @relation("WorkspaceProjectOwner")
+  workspaceVersions WorkspaceDocumentVersion[] @relation("WorkspaceDocumentVersionAuthor")
+  workspaceChanges  WorkspaceChangeRequest[]   @relation("WorkspaceChangeRequestAuthor")
+  docGridBranches   DocGridBranch[]             @relation("DocGridBranchCreator")
+  docGridCommits    DocGridCommit[]             @relation("DocGridCommitAuthor")
+  docGridReviewsAuthored DocGridReview[]        @relation("DocGridReviewAuthor")
+  docGridReviewsMerged   DocGridReview[]        @relation("DocGridReviewMerger")
+  docGridIssues     DocGridIssue[]               @relation("DocGridIssueAuthor")
+  docGridReleases   DocGridRelease[]             @relation("DocGridReleaseCreator")
+  docGridEvents     DocGridEvent[]               @relation("DocGridEventActor")
+  documentTasks     DocumentTask[]                @relation("DocumentTaskOwner")
+  preparedLegalDocuments PreparedLegalDocument[] @relation("PreparedLegalDocumentOwner")
+  preparedDocumentVersions DocumentVersion[]      @relation("DocumentVersionCreator")
+
+  @@index([emailVerifiedAt])
+  @@unique([identityProvider, externalSubject], map: "User_identity_provider_external_subject_key")
+  @@schema("docgrid")
+}
+
+model WorkspaceProject {
+  id             String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId        String                   @map("owner_id")
+  name           String                   @db.VarChar(120)
+  description    String?                  @db.VarChar(1000)
+  createdAt      DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime                 @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  owner          User                     @relation("WorkspaceProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  documents      WorkspaceDocument[]
+  changeRequests WorkspaceChangeRequest[]
+  docGridBranches DocGridBranch[]
+  docGridCommits  DocGridCommit[]
+  docGridReviews  DocGridReview[]
+  docGridIssues   DocGridIssue[]
+  docGridReleases DocGridRelease[]
+  docGridEvents   DocGridEvent[]
+
+  @@index([ownerId, updatedAt(sort: Desc)], map: "workspace_projects_owner_updated_idx")
+  @@map("workspace_projects")
+  @@schema("docgrid")
+}
+
+model WorkspaceDocument {
+  id             String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String                     @map("project_id") @db.Uuid
+  title          String                     @db.VarChar(180)
+  path           String                     @default("/") @db.VarChar(500)
+  content        String                     @default("")
+  version        Int                        @default(1)
+  createdAt      DateTime                   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime                   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  project        WorkspaceProject           @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  versions       WorkspaceDocumentVersion[]
+  changeRequests WorkspaceChangeRequest[]
+  docGridBranchDocuments DocGridBranchDocument[]
+  docGridCommits DocGridCommit[]
+  docGridIssues  DocGridIssue[]
+
+  @@index([projectId, path, title], map: "workspace_documents_project_path_title_idx")
+  @@map("workspace_documents")
+  @@schema("docgrid")
+}
+
+model WorkspaceDocumentVersion {
+  id         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId String            @map("document_id") @db.Uuid
+  version    Int
+  content    String
+  authorId   String            @map("author_id")
+  message    String            @default("Сохранена редакция") @db.VarChar(300)
+  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  document   WorkspaceDocument @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  author     User              @relation("WorkspaceDocumentVersionAuthor", fields: [authorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([documentId, version], map: "workspace_document_versions_document_version_key")
+  @@index([authorId, createdAt(sort: Desc)], map: "workspace_document_versions_author_idx")
+  @@map("workspace_document_versions")
+  @@schema("docgrid")
+}
+
+model WorkspaceChangeRequest {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId       String            @map("project_id") @db.Uuid
+  documentId      String            @map("document_id") @db.Uuid
+  authorId        String            @map("author_id")
+  title           String            @db.VarChar(180)
+  status          String            @default("OPEN") @db.VarChar(16)
+  baseVersion     Int               @map("base_version")
+  proposedContent String            @map("proposed_content")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  project         WorkspaceProject  @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  document        WorkspaceDocument @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  author          User              @relation("WorkspaceChangeRequestAuthor", fields: [authorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([projectId, createdAt(sort: Desc)], map: "workspace_change_requests_project_created_idx")
+  @@index([authorId, createdAt(sort: Desc)], map: "workspace_change_requests_author_idx")
+  @@map("workspace_change_requests")
+  @@schema("docgrid")
+}
+
+model DocGridBranch {
+  id          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId   String                  @map("project_id") @db.Uuid
+  name        String                  @db.VarChar(80)
+  kind        String                  @default("WORK") @db.VarChar(24)
+  createdBy   String                  @map("created_by")
+  createdAt   DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime                @default(now()) @map("updated_at") @db.Timestamptz(6)
+  project     WorkspaceProject        @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  creator     User                    @relation("DocGridBranchCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documents   DocGridBranchDocument[]
+  commits     DocGridCommit[]
+  reviewsFrom DocGridReview[]         @relation("DocGridReviewSource")
+  reviewsTo   DocGridReview[]         @relation("DocGridReviewTarget")
+  releases    DocGridRelease[]
+
+  @@unique([projectId, name], map: "docgrid_branches_project_name_key")
+  @@index([projectId, updatedAt(sort: Desc)], map: "docgrid_branches_project_updated_idx")
+  @@map("docgrid_branches")
+  @@schema("docgrid")
+}
+
+model DocGridCommit {
+  id             String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String                   @map("project_id") @db.Uuid
+  branchId       String                   @map("branch_id") @db.Uuid
+  documentId     String                   @map("document_id") @db.Uuid
+  parentCommitId String?                  @map("parent_commit_id") @db.Uuid
+  authorId       String                   @map("author_id")
+  message        String                   @db.VarChar(300)
+  beforeContent  String                   @map("before_content")
+  afterContent   String                   @map("after_content")
+  contentHash    String                   @map("content_hash") @db.Char(64)
+  createdAt      DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  project        WorkspaceProject         @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  branch         DocGridBranch            @relation(fields: [branchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  document       WorkspaceDocument        @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  author         User                     @relation("DocGridCommitAuthor", fields: [authorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parent         DocGridCommit?           @relation("DocGridCommitParent", fields: [parentCommitId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  children       DocGridCommit[]          @relation("DocGridCommitParent")
+  branchHeads    DocGridBranchDocument[]  @relation("DocGridBranchHeadCommit")
+
+  @@index([branchId, createdAt(sort: Desc)], map: "docgrid_commits_branch_created_idx")
+  @@index([documentId, createdAt(sort: Desc)], map: "docgrid_commits_document_created_idx")
+  @@map("docgrid_commits")
+  @@schema("docgrid")
+}
+
+model DocGridBranchDocument {
+  branchId        String             @map("branch_id") @db.Uuid
+  documentId      String             @map("document_id") @db.Uuid
+  revision        Int                @default(1)
+  content         String             @default("")
+  headCommitId    String?            @map("head_commit_id") @db.Uuid
+  workspaceVersion Int?              @map("workspace_version")
+  updatedAt       DateTime           @default(now()) @map("updated_at") @db.Timestamptz(6)
+  branch          DocGridBranch      @relation(fields: [branchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  document        WorkspaceDocument  @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  headCommit      DocGridCommit?     @relation("DocGridBranchHeadCommit", fields: [headCommitId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@id([branchId, documentId])
+  @@map("docgrid_branch_documents")
+  @@schema("docgrid")
+}
+
+model DocGridReview {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String            @map("project_id") @db.Uuid
+  sourceBranchId String            @map("source_branch_id") @db.Uuid
+  targetBranchId String            @map("target_branch_id") @db.Uuid
+  authorId       String            @map("author_id")
+  mergedBy       String?           @map("merged_by")
+  title          String            @db.VarChar(180)
+  body           String?           @db.VarChar(4000)
+  status         String            @default("OPEN") @db.VarChar(16)
+  sourceSnapshot Json              @map("source_snapshot")
+  targetSnapshot Json              @map("target_snapshot")
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime          @default(now()) @map("updated_at") @db.Timestamptz(6)
+  mergedAt       DateTime?         @map("merged_at") @db.Timestamptz(6)
+  project        WorkspaceProject  @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sourceBranch   DocGridBranch     @relation("DocGridReviewSource", fields: [sourceBranchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  targetBranch   DocGridBranch     @relation("DocGridReviewTarget", fields: [targetBranchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  author         User              @relation("DocGridReviewAuthor", fields: [authorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  merger         User?             @relation("DocGridReviewMerger", fields: [mergedBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([projectId, createdAt(sort: Desc)], map: "docgrid_reviews_project_created_idx")
+  @@map("docgrid_reviews")
+  @@schema("docgrid")
+}
+
+model DocGridIssue {
+  id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId        String             @map("project_id") @db.Uuid
+  linkedDocumentId String?            @map("linked_document_id") @db.Uuid
+  authorId         String             @map("author_id")
+  kind             String             @default("ISSUE") @db.VarChar(16)
+  status           String             @default("OPEN") @db.VarChar(16)
+  title            String             @db.VarChar(180)
+  body             String             @default("")
+  resolution       String?
+  createdAt        DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime           @default(now()) @map("updated_at") @db.Timestamptz(6)
+  decidedAt        DateTime?          @map("decided_at") @db.Timestamptz(6)
+  project          WorkspaceProject   @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  linkedDocument   WorkspaceDocument? @relation(fields: [linkedDocumentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  author           User               @relation("DocGridIssueAuthor", fields: [authorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([projectId, status, updatedAt(sort: Desc)], map: "docgrid_issues_project_status_idx")
+  @@map("docgrid_issues")
+  @@schema("docgrid")
+}
+
+model DocGridRelease {
+  id        String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId String           @map("project_id") @db.Uuid
+  branchId  String           @map("branch_id") @db.Uuid
+  createdBy String           @map("created_by")
+  tag       String           @db.VarChar(64)
+  title     String           @db.VarChar(180)
+  notes     String           @default("")
+  snapshot  Json
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  project   WorkspaceProject @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  branch    DocGridBranch    @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  creator   User             @relation("DocGridReleaseCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([projectId, tag], map: "docgrid_releases_project_tag_key")
+  @@index([projectId, createdAt(sort: Desc)], map: "docgrid_releases_project_created_idx")
+  @@map("docgrid_releases")
+  @@schema("docgrid")
+}
+
+model DocGridEvent {
+  id         BigInt           @id @default(autoincrement())
+  projectId  String           @map("project_id") @db.Uuid
+  actorId    String           @map("actor_id")
+  eventType  String           @map("event_type") @db.VarChar(64)
+  entityType String           @map("entity_type") @db.VarChar(32)
+  entityId   String?          @map("entity_id") @db.Uuid
+  metadata   Json             @default("{}")
+  createdAt  DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  project    WorkspaceProject @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  actor      User             @relation("DocGridEventActor", fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([projectId, createdAt(sort: Desc)], map: "docgrid_events_project_created_idx")
+  @@map("docgrid_events")
+  @@schema("docgrid")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+
+  @@schema("docgrid")
+}
+
+enum DocumentTaskOperation {
+  CREATE
+  REVIEW
+  EDIT
+
+  @@schema("docgrid")
+}
+
+enum DocumentTaskStatus {
+  ANALYZING
+  AWAITING_CONFIRMATION
+  QUEUED
+  GENERATING
+  CONVERTING
+  READY
+  FAILED
+  CANCELLED
+
+  @@schema("docgrid")
+}
+
+enum DocumentVersionStatus {
+  CONTENT_READY
+  GENERATING
+  READY
+  FAILED
+
+  @@schema("docgrid")
+}
+
+model DocumentTask {
+  id                  String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId             String                 @map("owner_id")
+  documentId          String?                @map("document_id") @db.Uuid
+  operation           DocumentTaskOperation
+  status              DocumentTaskStatus     @default(ANALYZING)
+  request             String                 @db.Text
+  attachments         Json                   @default("[]")
+  plan                Json?
+  planRevision        Int                    @default(0) @map("plan_revision")
+  baseVersion         Int?                   @map("base_version")
+  confirmationComment String?                @map("confirmation_comment") @db.Text
+  resultVersion       Int?                   @map("result_version")
+  failureCode         String?                @map("failure_code") @db.VarChar(80)
+  failureMessage      String?                @map("failure_message") @db.VarChar(500)
+  confirmedAt         DateTime?              @map("confirmed_at") @db.Timestamptz(6)
+  completedAt         DateTime?              @map("completed_at") @db.Timestamptz(6)
+  createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime               @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  owner               User                   @relation("DocumentTaskOwner", fields: [ownerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  document            PreparedLegalDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([ownerId, createdAt(sort: Desc)], map: "document_tasks_owner_created_idx")
+  @@index([status, updatedAt], map: "document_tasks_status_updated_idx")
+  @@index([documentId, createdAt(sort: Desc)], map: "document_tasks_document_created_idx")
+  @@map("document_tasks")
+  @@schema("docgrid")
+}
+
+model PreparedLegalDocument {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId        String            @map("owner_id")
+  title          String            @db.VarChar(240)
+  currentVersion Int               @default(0) @map("current_version")
+  nextVersion    Int               @default(1) @map("next_version")
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  owner          User              @relation("PreparedLegalDocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tasks          DocumentTask[]
+  versions       DocumentVersion[]
+
+  @@index([ownerId, updatedAt(sort: Desc)], map: "prepared_legal_documents_owner_updated_idx")
+  @@map("prepared_legal_documents")
+  @@schema("docgrid")
+}
+
+model DocumentVersion {
+  id                String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId        String                    @map("document_id") @db.Uuid
+  version           Int
+  status            DocumentVersionStatus     @default(GENERATING)
+  title             String                    @db.VarChar(240)
+  structuredContent Json                      @map("structured_content")
+  plainText         String                    @map("plain_text") @db.Text
+  sourceVersionId   String?                   @map("source_version_id") @db.Uuid
+  changeRequest     String?                   @map("change_request") @db.Text
+  docxObjectKey     String?                   @map("docx_object_key") @db.VarChar(1000)
+  pdfObjectKey      String?                   @map("pdf_object_key") @db.VarChar(1000)
+  docxSize          Int?                      @map("docx_size")
+  pdfSize           Int?                      @map("pdf_size")
+  checksum          String?                   @db.VarChar(64)
+  errorMessage      String?                   @map("error_message") @db.VarChar(500)
+  createdBy         String                    @map("created_by")
+  createdAt         DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+  readyAt           DateTime?                 @map("ready_at") @db.Timestamptz(6)
+  document          PreparedLegalDocument     @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  creator           User                      @relation("DocumentVersionCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sourceVersion     DocumentVersion?          @relation("DocumentVersionHistory", fields: [sourceVersionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  derivedVersions   DocumentVersion[]         @relation("DocumentVersionHistory")
+
+  @@unique([documentId, version], map: "document_versions_document_version_key")
+  @@index([documentId, status, version(sort: Desc)], map: "document_versions_document_status_version_idx")
+  @@index([createdBy, createdAt(sort: Desc)], map: "document_versions_creator_created_idx")
+  @@map("document_versions")
+  @@schema("docgrid")
+}
