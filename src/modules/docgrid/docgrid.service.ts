@@ -882,7 +882,7 @@ export class DocGridService {
 
   async files(ownerId:string,projectId:string,trash=false) {
     await this.requireRepo(this.prisma,ownerId,projectId);
-    const materials=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,mime,byte_size AS size,sha256,extraction_status AS "extractionStatus",created_at AS "createdAt",deleted_at AS "deletedAt" FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND (deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
+    const materials=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,mime,byte_size AS size,sha256,extraction_status AS "extractionStatus",extraction_reason AS "extractionReason",created_at AS "createdAt",deleted_at AS "deletedAt" FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND (deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
     const documents=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,docgrid_deleted_at AS "deletedAt" FROM docgrid.workspace_documents WHERE project_id=${projectId}::uuid AND (docgrid_deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
     const folders=await this.prisma.$queryRaw<any[]>`SELECT id,path FROM docgrid.docgrid_folders WHERE project_id=${projectId}::uuid ORDER BY path`;
     const artifacts=trash?[]:await this.prisma.$queryRaw<any[]>`SELECT d.id,d.title,b.path,d.current_version AS version FROM docgrid.dg_astra_documents b JOIN docgrid.prepared_legal_documents d ON d.id=b.document_id WHERE b.project_id=${projectId}::uuid ORDER BY b.path,d.title`;
@@ -974,7 +974,7 @@ export class DocGridService {
         const duplicate = await check(tx);
         if (duplicate) return duplicate;
         await this.ensureFolders(tx,projectId,normalizedPath);
-        const rows=await tx.$queryRaw<any[]>`INSERT INTO docgrid.docgrid_materials(project_id,title,path,mime,bytes,storage_key,byte_size,sha256,extracted_text,extraction_status,created_by) VALUES(${projectId}::uuid,${title},${normalizedPath},${mime},${key ? null : file.buffer}::bytea,${key},${file.buffer.length},${hash},${extracted},${status},${ownerId}) RETURNING id,title,path,sha256,extraction_status AS "extractionStatus"`;
+        const rows=await tx.$queryRaw<any[]>`INSERT INTO docgrid.docgrid_materials(project_id,title,path,mime,bytes,storage_key,byte_size,sha256,extracted_text,extraction_status,extraction_reason,created_by) VALUES(${projectId}::uuid,${title},${normalizedPath},${mime},${key ? null : file.buffer}::bytea,${key},${file.buffer.length},${hash},${extracted},${status},${extraction.reason},${ownerId}) RETURNING id,title,path,sha256,extraction_status AS "extractionStatus"`;
         await this.event(tx,projectId,ownerId,'material.added','material',rows[0].id,{title,path:normalizedPath,sha256:hash,bytes:file.buffer.length,storage:key?'s3':'database'});return rows[0];
       });
       log('completed', { materialId: result.id });
@@ -994,6 +994,29 @@ export class DocGridService {
     if(!rows[0])throw new NotFoundException('Материал не найден');
     const row = rows[0];
     return {id:row.id,title:row.title,mime:row.mime,sha256:row.sha256,bytes:await readMaterialBytes(row,this.materialStorage)};
+  }
+
+  async materialText(user:string,project:string,id:string) {
+    await this.requireRepo(this.prisma,user,project);
+    const rows=await this.prisma.$queryRaw<any[]>`SELECT extracted_text AS text,extraction_status AS status,extraction_reason AS reason FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    if(!rows[0])throw new NotFoundException('Материал не найден');
+    return rows[0];
+  }
+  async reextractMaterial(user:string,project:string,id:string) {
+    await this.requireRepo(this.prisma,user,project,'write');
+    const original=await this.material(user,project,id);
+    const extracted=await extractMaterialText(original.title,Buffer.from(original.bytes));
+    // A busy parser must never erase previously available text.
+    if(extracted.reason.endsWith('_busy'))throw new ConflictException('Обработка занята. Повторите позже.');
+    return this.prisma.$transaction(async tx=>{
+      await this.requireRepo(tx,user,project,'write');
+      const rows=await tx.$queryRaw<any[]>`SELECT extraction_status,extracted_text FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL AND sha256=${original.sha256} FOR UPDATE`;
+      if(!rows[0])throw new ConflictException('Материал изменён или удалён');
+      if(rows[0].extracted_text && extracted.status==='UNREAD')return {text:rows[0].extracted_text,status:rows[0].extraction_status,reason:extracted.reason,preserved:true};
+      await tx.$executeRaw`UPDATE docgrid.docgrid_materials SET extracted_text=${extracted.text},extraction_status=${extracted.status},extraction_reason=${extracted.reason} WHERE id=${id}::uuid`;
+      await this.event(tx,project,user,'material.text_extracted','material',id,{status:extracted.status,reason:extracted.reason});
+      return extracted;
+    });
   }
 
   async trashFile(ownerId:string,projectId:string,id:string,kind:'material'|'document',restore:boolean) {
@@ -1099,5 +1122,6 @@ export class DocGridService {
     `;
   }
 }
+
 
 

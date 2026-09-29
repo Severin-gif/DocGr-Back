@@ -4,6 +4,7 @@ const {randomUUID}=require('node:crypto');
 module.exports=async function({call,prefix,p,material,jwt,db}){
  let task='sort',calls=0;
  const server=createServer(async(req,res)=>{
+  if(req.url==='/internal/docgrid/config'){res.setHeader('content-type','application/json');res.end(JSON.stringify({enabled:true,discussionModels:[{id:'default',label:'Fixture'},{id:'claude',label:'Claude fixture'}]}));return;}
   let body='';for await(const c of req)body+=c;
   const input=JSON.parse(body);calls++;assert.equal(req.headers['x-docgrid-service-token'],'b'.repeat(64));
   const s=input.sources.find(s=>s.id===material.id);
@@ -49,6 +50,35 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   task='bad';await send({},502);assert.equal((await call(root+'/turns')).at(-1).status,'failed');
   await call(prefix+'/agents/grants/'+grant.grant.id+'/revoke','POST',{requestKey:randomUUID()},jwt('owner'),201);
   await send({},403);
+  // Built-in chat starts without a manually created grant; live ACL and settings remain authoritative.
+  task='chat';
+  await call('/api/docgrid/repositories','GET',undefined,jwt('reader'));
+  await call(prefix+'/members','PUT',{email:'reader@example.test',role:'READER'},jwt('owner'));
+  const cfg=await call(prefix+'/discussions/config','GET',undefined,jwt('reader'));assert.equal(cfg.canPrepare,false);assert.equal(cfg.models.length,2);
+  const builtin=await call(prefix+'/discussions','POST',{title:'Обычная LLM'},jwt('reader'),201);
+  const broot=prefix+'/discussions/'+builtin.id;
+  const bsend=(extra={},status=201)=>call(broot+'/turns','POST',{requestKey:randomUUID(),instruction:'Объясни',mode:'advisor',task:'chat',sourceIds:[material.id],model:'claude',...extra},jwt('reader'),status);
+  await bsend();
+  await bsend({model:'arbitrary-provider-model'},400);
+  // Viewer cannot turn a generated package into a writable proposal.
+  task='package';const readonlyPack=await bsend({mode:'helper',task:'package'});
+  await call(broot+'/turns/'+readonlyPack.id+'/proposal','POST',{},jwt('reader'),404);
+  await call(prefix+'/discussions/settings','PUT',{enabled:false},jwt('reader'),404);
+  await call(prefix+'/discussions/settings','PUT',{enabled:false},jwt('owner'));
+  await bsend({},403);
+  await call(prefix+'/discussions','POST',{title:'Запрещено'},jwt('reader'),403);
+  await call(prefix+'/discussions/settings','PUT',{enabled:true},jwt('owner'));
+  task='chat';
+  process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT='1';
+  await bsend({},429);
+  delete process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT;
+  const text=await call(prefix+'/materials/'+material.id+'/text','GET',undefined,jwt('reader'));assert.match(text.text,/Original evidence/);
+  await call(prefix+'/materials/'+material.id+'/extract','POST',{},jwt('reader'),404);
+  assert.equal((await call(prefix+'/materials/'+material.id+'/extract','POST',{},jwt('owner'),201)).status,'READY');
+  await call(prefix+'/members','PUT',{email:'reader@example.test',role:'REMOVE'},jwt('owner'));
+  await bsend({},404);
+  console.log('PASS built-in defaults, model allowlist, reader ACL, owner settings, daily limit and extraction authorization');
   console.log('PASS discussions: ACL, idempotent sends, evidence quotes, reviewed moves, advisor boundary, stale package rollback, draft package + attachments + payment gaps, grant revocation');
  }finally{await new Promise(resolve=>server.close(resolve));delete process.env.DOCGRID_ORCHESTRA_URL;}
 };
+

@@ -59,5 +59,25 @@ function pdf() {
   assert.equal(text.status, 'PARTIAL'); assert.equal(text.text.length, 200000);
   assert.equal((await extractMaterialText('bad.txt', Buffer.from([255]))).status, 'UNREAD');
   console.log('PASS bounded UTF-8 text and honest extraction status');
+  const fixture=fs.mkdtempSync(path.join(os.tmpdir(),'dg-office-test-'));
+  try {
+    const make=(name,entries)=>{
+      const target=path.join(fixture,name);
+      require('node:child_process').execFileSync('python3',['-c','import sys,json,zipfile; z=zipfile.ZipFile(sys.argv[1],"w",zipfile.ZIP_DEFLATED); [z.writestr(k,v) for k,v in json.load(sys.stdin).items()]; z.close()',target],{input:JSON.stringify(entries)});
+      return fs.readFileSync(target);
+    };
+    const doc=make('proof.docx',{'word/document.xml':'<document><p><t>Договор поставки</t></p><tbl><p><t>Сумма 100 рублей</t></p></tbl></document>'});
+    const parsed=await extractMaterialText('proof.docx',doc);assert.equal(parsed.status,'READY');assert.match(parsed.text,/Сумма 100 рублей/);
+    const sheet=make('proof.xlsx',{'xl/workbook.xml':'<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Расчёт" r:id="r1"/></sheets></workbook>','xl/_rels/workbook.xml.rels':'<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>','xl/sharedStrings.xml':'<sst><si><t>Долг</t></si></sst>','xl/worksheets/sheet1.xml':'<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1"><v>100</v></c><c r="C1"><f>B1*2</f></c></row></sheetData></worksheet>'});
+    const cells=await extractMaterialText('proof.xlsx',sheet);assert.equal(cells.status,'PARTIAL');assert.match(cells.text,/Расчёт/);assert.match(cells.text,/A1: Долг/);assert.match(cells.text,/B1: 100/);
+    const odt=make('proof.odt',{'content.xml':'<document><p>Текст ODT</p></document>'});assert.match((await extractMaterialText('proof.odt',odt)).text,/Текст ODT/);
+    const entity=make('bad.docx',{'word/document.xml':'<!DOCTYPE d [<!ENTITY x SYSTEM "file:///etc/passwd">]><document><p><t>&x;</t></p></document>'});assert.equal((await extractMaterialText('bad.docx',entity)).status,'UNREAD');
+    const bomb=make('large.docx',{'word/document.xml':'x'.repeat(33*1024*1024)});assert.equal((await extractMaterialText('large.docx',bomb)).status,'UNREAD');
+    assert.equal((await extractMaterialText('broken.docx',Buffer.from('invalid'))).status,'UNREAD');
+    assert.equal((await extractMaterialText('scan.docx',make('scan.docx',{'word/document.xml':'<document><p><drawing/></p></document>'}))).reason,'office_no_text');
+    console.log('PASS DOCX tables, XLSX cached values and incomplete formulas, ODT, malformed ZIP, expansion cap, DTD rejection and no OCR claims');
+  } finally {fs.rmSync(fixture,{recursive:true,force:true});}
+
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
 
