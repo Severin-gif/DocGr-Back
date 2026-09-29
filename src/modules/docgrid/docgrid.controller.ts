@@ -43,6 +43,10 @@ export class DocGridController {
   upload(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@UploadedFile() file:{originalname:string;mimetype:string;buffer:Buffer},@Body('path') path?:string,@Headers('x-request-id') requestId?:string) {return this.docgrid.uploadMaterial(user,project,file,path,requestId);}
   @Post('repositories/:projectId/materials/:id/relocate')
   relocate(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string,@Body() dto:DocGridRelocateMaterialDto) {return this.docgrid.relocateMaterial(user,project,id,dto);}
+  @Get('repositories/:projectId/materials/:id/text')
+  text(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string){return this.docgrid.materialText(user,project,id);}
+  @Post('repositories/:projectId/materials/:id/extract')
+  extract(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string){return this.docgrid.reextractMaterial(user,project,id);}
   @Get('repositories/:projectId/materials/:id/download')
   async download(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string,@Res({passthrough:true}) response:Response) {
     const file=await this.docgrid.material(user,project,id);
@@ -285,5 +289,6 @@ export class DocGridAdminController {
     return this.docgrid.adminEvents(Number.isFinite(limit) ? limit : 100);
   }
 }
+
 
 

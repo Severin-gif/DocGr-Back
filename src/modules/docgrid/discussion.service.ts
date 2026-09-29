@@ -1,4 +1,4 @@
-import { BadGatewayException, BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ConflictException, HttpException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AstraService } from './astra/astra.service';
@@ -8,6 +8,31 @@ import { ChatSource, DiscussionMode, DiscussionResult, PAYMENT_FIELDS, validateD
 @Injectable()
 export class DiscussionService {
   constructor(private readonly db:PrismaService,private readonly agents:AstraService){}
+  private dailyLimit() {
+    const n=Number(process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT ?? 30);
+    return Number.isInteger(n)&&n>=1&&n<=500?n:30;
+  }
+  private async providerConfig() {
+    const base=process.env.DOCGRID_ORCHESTRA_URL||'',token=process.env.DOCGRID_SERVICE_TOKEN||'';
+    if(!base||token.length<32)return {available:false,models:[] as {id:string;label:string}[]};
+    try {
+      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/config',{headers:{'x-docgrid-service-token':token},redirect:'error',signal:AbortSignal.timeout(5000)});
+      if(!response.ok){await response.body?.cancel();throw Error('config');}
+      const data=await response.json() as any;
+      const models=Array.isArray(data.discussionModels)?data.discussionModels.filter((m:any)=>typeof m.id==='string'&&m.id.length<=100&&typeof m.label==='string'&&m.label.length<=180).slice(0,20):[];
+      return {available:data.enabled===true&&models.length>0,models};
+    }catch{return {available:false,models:[] as {id:string;label:string}[]};}
+  }
+  async config(user:string,project:string) {
+    const access=await this.agents.builtinAccess(user,project),provider=await this.providerConfig();
+    const rows=await this.db.$queryRaw<any[]>`SELECT requests FROM docgrid.dg_ai_daily_usage WHERE user_id=${user} AND day=(now() AT TIME ZONE 'UTC')::date`;
+    const limit=this.dailyLimit(),used=rows[0]?.requests||0;
+    return {...access,...provider,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
+  }
+  async settings(user:string,project:string,raw:unknown) {
+    const r=objectInput(raw);assertKeys(r,['enabled']);if(typeof r.enabled!=='boolean')throw new BadRequestException('Укажите состояние встроенной LLM');
+    return this.agents.setBuiltinEnabled(user,project,r.enabled);
+  }
   private async thread(user:string,project:string,id:string){
     await this.agents.getCatalog(user,project);
     const rows=await this.db.$queryRaw<any[]>`SELECT * FROM docgrid.dg_discussions WHERE id=${id}::uuid AND project_id=${project}::uuid AND owner_id=${user}`;
@@ -18,9 +43,10 @@ export class DiscussionService {
     return this.db.$queryRaw<any[]>`SELECT id,title,grant_id AS "grantId",created_at AS "createdAt" FROM docgrid.dg_discussions WHERE project_id=${project}::uuid AND owner_id=${user} ORDER BY created_at DESC LIMIT 100`;
   }
   async create(user:string,project:string,raw:unknown){
-    const r=objectInput(raw);assertKeys(r,['title','grantId']);const grantId=uuidInput(r,'grantId'),title=stringInput(r,'title',180);
-    const grants=await this.agents.listGrants(user,project),grant=grants.grants.find(g=>g.id===grantId);
-    if(!grant||grant.revokedAt||new Date(grant.expiresAt).getTime()<=Date.now())throw new BadRequestException('Выберите действующий доступ LLM');
+    const r=objectInput(raw);assertKeys(r,['title','grantId']);const title=stringInput(r,'title',180);
+    const grantId=r.grantId?uuidInput(r,'grantId'):(await this.agents.createBuiltinGrant(user,project)).id;
+    if(r.grantId){const grants=await this.agents.listGrants(user,project),grant=grants.grants.find(g=>g.id===grantId);
+    if(!grant||grant.revokedAt||new Date(grant.expiresAt).getTime()<=Date.now())throw new BadRequestException('Выберите действующий доступ LLM');}
     const rows=await this.db.$queryRaw<any[]>`INSERT INTO docgrid.dg_discussions(project_id,owner_id,grant_id,title) VALUES(${project}::uuid,${user},${grantId}::uuid,${title}) RETURNING id,title,grant_id AS "grantId"`;
     return rows[0];
   }
@@ -31,10 +57,11 @@ export class DiscussionService {
     return this.db.$queryRaw<any[]>`SELECT id,instruction,mode,status,result,context,provider,error,proposal_id AS "proposalId",created_at AS "createdAt" FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid ORDER BY created_at,id LIMIT 200`;
   }
   async send(user:string,project:string,id:string,raw:unknown){
-    const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query']);
+    const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query','model']);
     const requestKey=stringInput(r,'requestKey',120),instruction=stringInput(r,'instruction',8000),mode=stringInput(r,'mode',20) as DiscussionMode;
     if(!['advisor','helper','assistant'].includes(mode))throw new BadRequestException('Неизвестный режим');
     const task=stringInput(r,'task',20);if(!['chat','sort','package'].includes(task)||(mode==='advisor'&&task==='package'))throw new BadRequestException('Задача недоступна в этом режиме');
+    const model=stringInput(r,'model',100,false)||'default';
     const offset=integerInput(r,'offset',0,5000,0),query=stringInput(r,'query',200,false);
     const folder=r.folder===undefined?null:stringInput(r,'folder',500);
     if(r.sourceIds!==undefined&&(!Array.isArray(r.sourceIds)||r.sourceIds.length>500))throw new BadRequestException('Слишком много выбранных файлов');
@@ -48,9 +75,15 @@ export class DiscussionService {
       if(running.length)throw new ConflictException('Дождитесь ответа в этом обсуждении');
       const count=await tx.$queryRaw<{n:number}[]>`SELECT count(*)::int AS n FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid`;
       if(count[0].n>=200)throw new BadRequestException('Создайте новое обсуждение');
+      const config=await this.providerConfig();
+      if(!config.available)throw new ServiceUnavailableException('Встроенная LLM временно недоступна. Проверьте подключение в настройках проекта.');
+      if(!config.models.some((m:any)=>m.id===model))throw new BadRequestException('Выбранная модель недоступна');
+      const limit=this.dailyLimit();
+      const budget=await tx.$queryRaw<any[]>`INSERT INTO docgrid.dg_ai_daily_usage(user_id,day,requests) VALUES(${user},(now() AT TIME ZONE 'UTC')::date,1) ON CONFLICT(user_id,day) DO UPDATE SET requests=docgrid.dg_ai_daily_usage.requests+1 WHERE docgrid.dg_ai_daily_usage.requests<${limit} RETURNING requests`;
+      if(!budget.length)throw new HttpException('Дневной лимит ИИ исчерпан. Он обновляется в 00:00 UTC.',429);
       await tx.$executeRaw`INSERT INTO docgrid.dg_discussion_turns(id,discussion_id,request_key,body_digest,instruction,mode,status) VALUES(${turnId}::uuid,${id}::uuid,${requestKey},${bodyDigest},${instruction},${mode},'running')`;
       return null;
-    });
+    },{timeout:15000});
     if(prior)return {id:prior.id,status:prior.status};
     const call=async(tool:string,input:Record<string,unknown>)=>(await this.agents.executeForUser(user,thread.grant_id,tool,{projectId:project,runId:turnId,traceId:turnId,requestKey:randomUUID(),input})).output as any;
     try{
@@ -69,7 +102,7 @@ export class DiscussionService {
       const token=process.env.DOCGRID_SERVICE_TOKEN||'',base=process.env.DOCGRID_ORCHESTRA_URL||'';
       if(token.length<32||!base)throw new ServiceUnavailableException('Настройте DOCGRID_ORCHESTRA_URL и DOCGRID_SERVICE_TOKEN в Doc-Back');
       const url=new URL(base);if(!['https:','http:'].includes(url.protocol)||url.username||url.password)throw new ServiceUnavailableException('Некорректный адрес AI-Orchestra');
-      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/discussion',{method:'POST',redirect:'error',signal:AbortSignal.timeout(85000),headers:{'Content-Type':'application/json','x-docgrid-service-token':token},body:JSON.stringify({mode,task,instruction,sources,history:history.reverse().flatMap(h=>[{role:'user',text:h.instruction},{role:'assistant',text:h.result.answer}])})});
+      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/discussion',{method:'POST',redirect:'error',signal:AbortSignal.timeout(85000),headers:{'Content-Type':'application/json','x-docgrid-service-token':token},body:JSON.stringify({model,mode,task,instruction,sources,history:history.reverse().flatMap(h=>[{role:'user',text:h.instruction},{role:'assistant',text:h.result.answer}])})});
       if(!response.ok||!response.body){await response.body?.cancel();throw new BadGatewayException(`ИИ недоступен (${response.status}). Проверьте настройки AI-Orchestra.`);}
       const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;
       try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>1000000){await reader.cancel();throw new Error('Response limit');}chunks.push(value);}}finally{reader.releaseLock();}
@@ -110,3 +143,4 @@ export class DiscussionService {
     return operation;
   }
 }
+

@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export const MATERIAL_TEXT_LIMIT = 200_000;
 export const PDF_EXTRACTION_MAX_BYTES = 32 * 1024 * 1024;
@@ -36,6 +36,7 @@ export async function extractMaterialText(title: string, bytes: Buffer): Promise
     if (text.includes('\uFFFD')) return unread('invalid_utf8');
     return { text, status: bytes.length > Buffer.byteLength(text) ? 'PARTIAL' : 'READY', reason: 'text' };
   }
+  if (/\.(docx|xlsx|xls|doc|odt)$/i.test(title)) return extractOfficeText(title, bytes);
   if (!/\.pdf$/i.test(title) || bytes.subarray(0, 5).toString() !== '%PDF-') return unread('unsupported');
   if (bytes.length > PDF_EXTRACTION_MAX_BYTES) return unread('pdf_size_limit');
   if (pdfActive) return unread('pdf_busy');
@@ -60,3 +61,26 @@ export async function extractMaterialText(title: string, bytes: Buffer): Promise
   }
 }
 
+
+
+async function extractOfficeText(title: string, bytes: Buffer): Promise<MaterialExtraction> {
+  if (bytes.length > PDF_EXTRACTION_MAX_BYTES) return unread('office_size_limit');
+  if (pdfActive) return unread('office_busy');
+  pdfActive = true;
+  let directory: string | undefined;
+  try {
+    directory = await mkdtemp(join(tmpdir(), 'docgrid-extract-'));
+    const kind = title.split('.').pop()!.toLowerCase(), input = join(directory, 'source.' + kind);
+    await writeFile(input, bytes, {mode:0o600});
+    const output = kind === 'doc'
+      ? {text:await runLimitedExtraction('antiword',['-m','UTF-8.txt',input]),partial:false}
+      : JSON.parse(await runLimitedExtraction('python3',['-I',resolve(__dirname,'../../../scripts/extract-office.py'),input,kind]));
+    if (typeof output.text !== 'string' || !output.text.trim()) return unread('office_no_text');
+    return {text:output.text.slice(0,MATERIAL_TEXT_LIMIT),status:output.partial||output.text.length>MATERIAL_TEXT_LIMIT?'PARTIAL':'READY',reason:'office'};
+  } catch(error) {
+    return unread((error as {killed?:boolean}).killed?'office_timeout':'office_failed');
+  } finally {
+    try { if(directory) await rm(directory,{recursive:true,force:true}).catch(()=>undefined); }
+    finally { pdfActive=false; }
+  }
+}

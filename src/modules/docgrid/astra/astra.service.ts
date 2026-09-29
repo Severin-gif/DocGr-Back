@@ -7,7 +7,7 @@ import { ASTRA_WORKFLOW_SCHEMAS, ASTRA_WORKFLOW_TOOLS, AstraWorkflowService } fr
 import { ASTRA_UPLOAD_LIMITS, ASTRA_UPLOAD_SCHEMAS, ASTRA_UPLOAD_TOOLS, AstraUploadService } from './astra-upload.service';
 
 type Grant = {
-  id: string; projectId: string; ownerId: string; agentRef: string; actions: string[];
+  id: string; projectId: string; ownerId: string; agentRef: string; actions: string[]; builtin: boolean;
   allowedSourceIds: string[] | null; expiresAt: Date; revokedAt: Date | null;
   maxOperations: number; usedOperations: number; createdAt: Date; bodyDigest: string;
 };
@@ -40,7 +40,7 @@ export class AstraService {
     if (!rows.length) throw new NotFoundException('Project not found or access denied');
   }
   private async grantById(tx: AstraDb, id: string): Promise<Grant> {
-    const rows = await tx.$queryRaw<Grant[]>`SELECT id,project_id AS "projectId",owner_id AS "ownerId",agent_ref AS "agentRef",actions,allowed_source_ids AS "allowedSourceIds",expires_at AS "expiresAt",revoked_at AS "revokedAt",max_operations AS "maxOperations",used_operations AS "usedOperations",created_at AS "createdAt",body_digest AS "bodyDigest" FROM docgrid.dg_astra_grants WHERE id=${id}::uuid FOR UPDATE`;
+    const rows = await tx.$queryRaw<Grant[]>`SELECT id,builtin,project_id AS "projectId",owner_id AS "ownerId",agent_ref AS "agentRef",actions,allowed_source_ids AS "allowedSourceIds",expires_at AS "expiresAt",revoked_at AS "revokedAt",max_operations AS "maxOperations",used_operations AS "usedOperations",created_at AS "createdAt",body_digest AS "bodyDigest" FROM docgrid.dg_astra_grants WHERE id=${id}::uuid FOR UPDATE`;
     if (!rows[0]) throw new NotFoundException('Grant not found');
     return rows[0];
   }
@@ -180,13 +180,49 @@ export class AstraService {
   async execute(token:string,tool:string,raw:unknown) {
     return this.executeAuthorized(tool,raw,(tx,projectId,mutation)=>this.authorizedGrant(tx,token,projectId,tool,mutation));
   }
-  // Built-in LLM uses the same grant checks, budget, ledger and approval dispatcher as MCP.
+  async builtinAccess(user: string, project: string, write = false) {
+    return this.prisma.$transaction(async tx => {
+      await this.requireProject(tx, user, project, write ? 'owner' : 'read');
+      const rows = await tx.$queryRaw<any[]>`SELECT p.owner_id=${user} AS "isOwner", (p.owner_id=${user} OR EXISTS(SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${user} AND m.role IN ('EDITOR','REVIEWER'))) AS "canPrepare", COALESCE(s.builtin_enabled,true) AS enabled FROM docgrid.workspace_projects p LEFT JOIN docgrid.dg_ai_settings s ON s.project_id=p.id WHERE p.id=${project}::uuid`;
+      return rows[0] as {isOwner:boolean;canPrepare:boolean;enabled:boolean};
+    });
+  }
+  async setBuiltinEnabled(user: string, project: string, enabled: boolean) {
+    return this.prisma.$transaction(async tx => {
+      await this.requireProject(tx,user,project,'owner');
+      await tx.$executeRaw`INSERT INTO docgrid.dg_ai_settings(project_id,builtin_enabled) VALUES(${project}::uuid,${enabled}) ON CONFLICT(project_id) DO UPDATE SET builtin_enabled=EXCLUDED.builtin_enabled`;
+      await tx.$executeRaw`INSERT INTO docgrid.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata) VALUES(${project}::uuid,${user},'ai.settings.changed','repository',${project}::uuid,${JSON.stringify({builtinEnabled:enabled})}::jsonb)`;
+      return {enabled};
+    });
+  }
+  // Internal only: the credential is never issued. Each call still rechecks the user's live ACL.
+  async createBuiltinGrant(user:string,project:string) {
+    return this.prisma.$transaction(async tx=>{
+      await this.requireProject(tx,user,project);
+      const settings=await tx.$queryRaw<any[]>`SELECT builtin_enabled FROM docgrid.dg_ai_settings WHERE project_id=${project}::uuid`;
+      if(settings[0]?.builtin_enabled===false)throw new ForbiddenException('Встроенная LLM отключена владельцем проекта');
+      const actions=['docgrid_get_snapshot','docgrid_read_source','docgrid_search','docgrid_propose_structure','docgrid_propose_package'];
+      const id=randomUUID(), requestKey='builtin:'+id, expiresAt=new Date(Date.now()+30*86400000);
+      const tokenHash=createHash('sha256').update(randomBytes(32)).digest('hex');
+      await tx.$executeRaw`INSERT INTO docgrid.dg_astra_grants(id,project_id,owner_id,agent_ref,token_hash,actions,expires_at,max_operations,request_key,body_digest,builtin) VALUES(${id}::uuid,${project}::uuid,${user},'Встроенная LLM',${tokenHash},${JSON.stringify(actions)}::jsonb,${expiresAt},10000,${requestKey},${digest({user,project,id})},true)`;
+      const grant=await this.grantById(tx,id);
+      await this.event(tx,this.context(grant,{id,runId:'grant-management',requestKey,traceId:requestKey}),'astra.grant.created',{builtin:true,expiresAt,actions});
+      return this.publicGrant(grant);
+    });
+  }
+  // Same ledger, scopes, approval dispatcher and budgets as external connectors.
   async executeForUser(ownerId:string,grantId:string,tool:string,raw:unknown) {
     return this.executeAuthorized(tool,raw,async(tx,projectId,mutation)=>{
-      await this.requireProject(tx,ownerId,projectId,'owner');
+      await this.requireProject(tx,ownerId,projectId);
       const grant=await this.grantById(tx,grantId);
       if(grant.ownerId!==ownerId)throw new ForbiddenException('Grant owner mismatch');
-      await this.requireProject(tx,ownerId,projectId,mutation?'write':'read');
+      {
+        const settings=await tx.$queryRaw<any[]>`SELECT builtin_enabled FROM docgrid.dg_ai_settings WHERE project_id=${projectId}::uuid`;
+        if(settings[0]?.builtin_enabled===false)throw new ForbiddenException('Встроенная LLM отключена владельцем проекта');
+      }
+      // A captured snapshot is derived read data, not a document edit. Viewers may capture
+      // it only through this internal grant; proposals still require current write access.
+      await this.requireProject(tx,ownerId,projectId,mutation && !(grant.builtin && tool==='docgrid_get_snapshot')?'write':'read');
       this.assertGrant(grant,projectId,tool); return grant;
     });
   }
@@ -235,6 +271,7 @@ export class AstraService {
     const bodyDigest=digest({action,id,...input});
     return this.prisma.$transaction(async tx=>{
       await this.requireProject(tx,ownerId,projectId,'owner');const operation=await this.operation(tx,projectId,id),grant=await this.grantById(tx,operation.grantId);
+      if(action==='approve'&&grant.builtin){const settings=await tx.$queryRaw<any[]>`SELECT builtin_enabled FROM docgrid.dg_ai_settings WHERE project_id=${projectId}::uuid`;if(settings[0]?.builtin_enabled===false)throw new ForbiddenException('Встроенная LLM отключена владельцем проекта');}
       if(action==='approve'){await this.requireProject(tx,grant.ownerId,projectId,'write');this.assertGrant(grant,projectId,operation.tool);}
       const prior=await this.priorDecision(tx,ownerId,projectId,requestKey,bodyDigest);if(prior!==undefined)return prior;
       const cancellableApprovedPlan=action==='cancel'&&operation.tool==='docgrid_plan_document'&&operation.status==='completed';
@@ -289,4 +326,5 @@ export class AstraService {
     },{timeout:30000});
   }
 }
+
 
