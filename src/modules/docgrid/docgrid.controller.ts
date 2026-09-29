@@ -1,3 +1,4 @@
+import { AstraService } from './astra/astra.service';
 import {DocGridBackupService} from './docgrid-backup.service';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
@@ -29,8 +30,14 @@ import { DOCGRID_PROJECT_MAX_BYTES, DocGridService } from './docgrid.service';
 @UseGuards(DocGridIdentityGuard)
 @Controller('api/docgrid')
 export class DocGridController {
-  constructor(private readonly docgrid: DocGridService) {}
+  constructor(private readonly docgrid: DocGridService, private readonly agents: AstraService) {}
 
+  @Post('repositories/:projectId/search')
+  search(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Body() input:unknown){return this.agents.humanSearch(user,project,input);}
+  @Get('repositories/:projectId/extraction')
+  extraction(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string){return this.docgrid.extractionStatus(user,project);}
+  @Post('repositories/:projectId/materials/:id/ocr')
+  ocr(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string){return this.docgrid.retryOcr(user,project,id);}
   @Get('repositories/:projectId/files')
   files(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Query('trash') trash?:string) {return this.docgrid.files(user,project,trash==='true');}
   @Post('repositories/:projectId/folders')
