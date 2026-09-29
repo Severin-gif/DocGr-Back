@@ -63,6 +63,7 @@ export async function recognizePage(
   page: number,
   pdf: boolean,
 ): Promise<OcrPage> {
+  let nativeText = "";
   if (pdf) {
     const text = await runOcrCommand(
       "pdftotext",
@@ -70,6 +71,7 @@ export async function recognizePage(
       15000,
     ).catch(() => "");
     const clean = text.replace(/\f/g, "").trim();
+    nativeText = clean;
     if ((clean.match(/\p{L}/gu) || []).length >= 40)
       return { page, text: clean, method: "native", status: "READY" };
   }
@@ -98,7 +100,13 @@ export async function recognizePage(
         "3",
       ])
     ).trim();
+    if (!text && nativeText)
+      return { page, text: nativeText, method: "native", status: "PARTIAL" };
     return { page, text, method: "ocr", status: text ? "READY" : "UNREAD" };
+  } catch (error) {
+    if (nativeText)
+      return { page, text: nativeText, method: "native", status: "PARTIAL" };
+    throw error;
   } finally {
     if (pdf) await rm(image, { force: true });
   }
