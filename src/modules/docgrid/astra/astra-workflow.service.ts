@@ -124,21 +124,22 @@ export class AstraWorkflowService {
     const missingData=this.strings(input.missingData,'missingData',60,2000);
     const folders=await tx.$queryRaw<Array<{path:string}>>`SELECT path FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid`;
     const existing=new Set(folders.map(f=>f.path)),changes:Array<Record<string,unknown>>=[];
-    const destination=folder+'/Приложения';
+    const destination=attachmentIds.length?folder+'/Приложения':folder;
     const parts=destination.split('/').filter(Boolean);
     for(let i=1;i<=parts.length;i++){const path='/'+parts.slice(0,i).join('/');if(!existing.has(path))changes.push({action:'create_folder',path});}
     for(const sourceId of attachmentIds)changes.push({action:'move_source',sourceId,path:destination});
-    // A non-empty structure proposal binds this package to the live tree and rejects stale approval.
-    if(!changes.length)throw new ConflictException('Package folder already exists without new attachments; choose a new folder');
-    const structure=await this.sources.execute(tx,ctx,'docgrid_propose_structure',{baseTreeRevision:input.baseTreeRevision,changes});
-    const approval={folder,documents,sourceSnapshotId:snapshotId,sourceRefs,missingData,structure:structure.approval};
+    const live=await this.sources.execute(tx,ctx,'docgrid_list_tree',{});
+    if((live.output as any).treeRevision!==input.baseTreeRevision)throw new ConflictException('Project changed; prepare the instruction again');
+    const structure=changes.length?await this.sources.execute(tx,ctx,'docgrid_propose_structure',{baseTreeRevision:input.baseTreeRevision,changes}):null;
+    const approval={folder,documents,sourceSnapshotId:snapshotId,sourceRefs,missingData,baseTreeRevision:input.baseTreeRevision,structure:structure?.approval||null};
     return {status:'needs_user_action',approval,output:{kind:'package',status:'DRAFT',...approval,attachmentIds}};
   }
 
   private async approvePackage(tx:AstraDb,ctx:AstraContext,operation:AstraOperation):Promise<AstraDomainResult>{
     const a=objectInput(operation.approval);
     await this.sources.validateSourceRefs(tx,ctx,a.sourceSnapshotId as string,a.sourceRefs);
-    await this.sources.approve(tx,ctx,{...operation,tool:'docgrid_propose_structure',approval:a.structure},{});
+    if(a.structure)await this.sources.approve(tx,ctx,{...operation,tool:'docgrid_propose_structure',approval:a.structure},{});
+    else {const live=await this.sources.execute(tx,ctx,'docgrid_list_tree',{});if((live.output as any).treeRevision!==a.baseTreeRevision)throw new ConflictException('Project changed; prepare the instruction again');}
     const artifacts=[];
     for(const content of a.documents as CanonicalDocument[]){
       const planned=await this.plan(tx,ctx,{purpose:'Подготовить согласованный комплект документов',requestedResult:content.title,
@@ -517,4 +518,5 @@ export const ASTRA_WORKFLOW_SCHEMAS: Record<string, { description: string; input
   docgrid_compare_versions: { description: 'Compare two exact canonical versions by addressed blocks, reporting before/after and content hashes.',
     inputSchema: schema(['artifactId', 'fromVersion', 'toVersion'], { artifactId: uuidSchema, fromVersion: versionSchema, toVersion: versionSchema }) },
 };
+
 

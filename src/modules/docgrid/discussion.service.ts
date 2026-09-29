@@ -1,3 +1,4 @@
+import { LEGAL_INSTRUCTION_FOLDER, instructionDocument, resolveDiscussionTask, validateLegalInstructionResponse } from './legal-instruction.protocol';
 import { BadGatewayException, BadRequestException, ConflictException, HttpException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -65,7 +66,7 @@ export class DiscussionService {
     const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query','model']);
     const requestKey=stringInput(r,'requestKey',120),instruction=stringInput(r,'instruction',8000),mode=stringInput(r,'mode',20) as DiscussionMode;
     if(!['advisor','helper','assistant'].includes(mode))throw new BadRequestException('Неизвестный режим');
-    const task=stringInput(r,'task',20);if(!['chat','sort','package'].includes(task)||(mode==='advisor'&&task==='package'))throw new BadRequestException('Задача недоступна в этом режиме');
+    const task=resolveDiscussionTask(stringInput(r,'task',20),instruction,mode);if(!['chat','sort','package','instruction'].includes(task)||(mode==='advisor'&&['package','instruction'].includes(task)))throw new BadRequestException('Задача недоступна в этом режиме');
     const model=stringInput(r,'model',100,false)||'default';
     const offset=integerInput(r,'offset',0,5000,0),query=stringInput(r,'query',200,false);
     const folder=r.folder===undefined?null:stringInput(r,'folder',500);
@@ -96,7 +97,7 @@ export class DiscussionService {
       const snapshotId=snapshot.snapshotId,treeRevision=snapshot.treeRevision,manifest:any[]=[...snapshot.manifest];
       while(snapshot.continuation){snapshot=await call('docgrid_get_snapshot',{snapshotId,cursor:snapshot.continuation,limit:200});manifest.push(...snapshot.manifest);}
       if(selected?.some(sourceId=>!manifest.some(s=>s.sourceId===sourceId)))throw new BadRequestException('Выбранный файл недоступен в рамках этого доступа');
-      let candidates=manifest.filter(s=>(selected===null||selected.includes(s.sourceId))&&(!folder||folder==='/'||s.path===folder||s.path.startsWith(folder+'/')));
+      let candidates=manifest.filter(s=>(task!=='instruction'||(s.path!==LEGAL_INSTRUCTION_FOLDER&&!s.path.startsWith(LEGAL_INSTRUCTION_FOLDER+'/')))&&(selected===null||selected.includes(s.sourceId))&&(!folder||folder==='/'||s.path===folder||s.path.startsWith(folder+'/')));
       const sources:ChatSource[]=[],refs:any[]=[],coverage:any[]=[];
       let retrieval:any=null,batch:any[]=[],used=0;
       // Rank passages over the entire authorized snapshot; the model receives a bounded evidence bundle.
@@ -130,7 +131,7 @@ export class DiscussionService {
         for(const s of batch){const read=await call('docgrid_read_source',{sourceRef:s.sourceRef,maxChars:5000});sources.push({id:s.sourceId,title:s.title,path:s.path,text:read.text,status:read.truncated?'PARTIAL':read.status});refs.push(s.sourceRef);coverage.push({sourceId:s.sourceId,title:s.title,path:s.path,status:read.status,truncated:read.truncated,characters:read.text.length,sourceRef:s.sourceRef});}
         if(retrieval)retrieval.fallback='first-source-sample-no-search-hits';
       }
-      const context={snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
+      const context={task,snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
       await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET context=${JSON.stringify(context)}::jsonb WHERE id=${turnId}::uuid`;
       const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' ORDER BY created_at DESC LIMIT 4`;
       const token=process.env.DOCGRID_SERVICE_TOKEN||'',base=process.env.DOCGRID_ORCHESTRA_URL||'';
@@ -141,7 +142,7 @@ export class DiscussionService {
       const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;
       try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>1000000){await reader.cancel();throw new Error('Response limit');}chunks.push(value);}}finally{reader.releaseLock();}
       let payload:any,result:DiscussionResult;
-      try{payload=JSON.parse(Buffer.concat(chunks).toString('utf8'));result=validateDiscussionResult(payload.result,sources,mode);}catch{throw new BadGatewayException('Модель вернула неподтверждённые данные или неверный формат. Предложение не создано.');}
+      try{payload=JSON.parse(Buffer.concat(chunks).toString('utf8'));result=(task==='instruction'?validateLegalInstructionResponse:validateDiscussionResult)(payload.result,sources,mode);}catch{throw new BadGatewayException('Модель вернула неподтверждённые данные или неверный формат. Предложение не создано.');}
       // Fresh authorization after model latency; revoked grants cannot commit a new result.
       await call('docgrid_get_capabilities',{});
       const provider={model:typeof payload.model==='string'?payload.model.slice(0,200):null,requestId:payload.requestId,usage:payload.usage};
@@ -158,7 +159,9 @@ export class DiscussionService {
     if(turn.proposal_id)return this.agents.getOperation(user,project,turn.proposal_id);
     const result=turn.result as DiscussionResult,context=turn.context,pack=result.package;
     let tool:string,input:Record<string,unknown>;
-    if(pack){
+    if(context.task==='instruction' && result.legalInstruction){
+      tool='docgrid_propose_package';input={baseTreeRevision:context.treeRevision,folder:LEGAL_INSTRUCTION_FOLDER,documents:[instructionDocument(result.legalInstruction,Object.fromEntries(context.sources.map((s:any)=>[s.sourceId,s.path.replace(/\/$/,'')+'/'+s.title])))],sourceSnapshotId:context.snapshotId,sourceRefs:context.sourceRefs,attachmentIds:[],missingData:result.package?.missingData||[]};
+    }else if(pack){
       const missing=[...pack.missingData,'Проверить актуальность права, госпошлины и банковских реквизитов перед подачей и оплатой.'];
       const docs=[...pack.documents];
       if(pack.payment){const map=new Map(pack.payment.map(f=>[f.field,f]));docs.push({title:'Платёжное поручение — черновик реквизитов',text:'НЕ ДЛЯ ОПЛАТЫ. Реквизиты перенесены из материалов и не проверены на актуальность.\n'+PAYMENT_FIELDS.map(field=>{const f=map.get(field);return `${field}: ${f?.value||'[ТРЕБУЕТСЯ ЗАПОЛНИТЬ]'}${f?.value?' (источник: '+f.evidence.map(e=>e.sourceId).join(', ')+')':''}`;}).join('\n')});}
@@ -177,4 +180,3 @@ export class DiscussionService {
     return operation;
   }
 }
-
