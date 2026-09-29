@@ -13,21 +13,26 @@ export class DiscussionService {
     return Number.isInteger(n)&&n>=1&&n<=500?n:30;
   }
   private async providerConfig() {
-    const base=process.env.DOCGRID_ORCHESTRA_URL||'',token=process.env.DOCGRID_SERVICE_TOKEN||'';
-    if(!base||token.length<32)return {available:false,models:[] as {id:string;label:string}[]};
+    const base=process.env.DOCGRID_ORCHESTRA_URL?.trim()||'',token=process.env.DOCGRID_SERVICE_TOKEN||'';
+    const unavailable=(connectionStatus:string,connectionMessage:string)=>({available:false,models:[] as {id:string;label:string}[],connectionStatus,connectionMessage});
+    if(!base||token.length<32)return unavailable('backend_not_configured','В Doc-Back проверьте DOCGRID_ORCHESTRA_URL и DOCGRID_SERVICE_TOKEN (не менее 32 символов).');
     try {
+      const url=new URL(base);
+      if(!['https:','http:'].includes(url.protocol)||url.username||url.password)return unavailable('backend_not_configured','В Doc-Back укажите корректный DOCGRID_ORCHESTRA_URL.');
       const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/config',{headers:{'x-docgrid-service-token':token},redirect:'error',signal:AbortSignal.timeout(5000)});
-      if(!response.ok){await response.body?.cancel();throw Error('config');}
+      if(!response.ok){await response.body?.cancel();return unavailable(response.status===401||response.status===403?'service_auth_failed':'service_error',response.status===401||response.status===403?'Проверьте совпадение DOCGRID_SERVICE_TOKEN в Doc-Back и AI-Orchestra.':`AI-Orchestra вернул HTTP ${response.status}. Проверьте его деплой и настройки DocGrid.`);}
       const data=await response.json() as any;
       const models=Array.isArray(data.discussionModels)?data.discussionModels.filter((m:any)=>typeof m.id==='string'&&m.id.length<=100&&typeof m.label==='string'&&m.label.length<=180).slice(0,20):[];
-      return {available:data.enabled===true&&models.length>0,models};
-    }catch{return {available:false,models:[] as {id:string;label:string}[]};}
+      if(data.enabled!==true)return unavailable('orchestra_disabled','В AI-Orchestra включите DOCGRID_ENABLED=true.');
+      if(!models.length)return unavailable('no_models','В AI-Orchestra проверьте ключ OpenRouter и DOCGRID_MODEL / DOCGRID_DISCUSSION_MODELS.');
+      return {available:true,models,connectionStatus:'ready',connectionMessage:'Список моделей получен. Доступность генерации проверяется отправкой сообщения.'};
+    }catch{return unavailable('unreachable','Doc-Back не смог получить настройки AI-Orchestra. Проверьте адрес, доступность и журнал сервиса.');}
   }
   async config(user:string,project:string) {
     const access=await this.agents.builtinAccess(user,project),provider=await this.providerConfig();
     const rows=await this.db.$queryRaw<any[]>`SELECT requests FROM docgrid.dg_ai_daily_usage WHERE user_id=${user} AND day=(now() AT TIME ZONE 'UTC')::date`;
     const limit=this.dailyLimit(),used=rows[0]?.requests||0;
-    return {...access,...provider,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
+    return {...access,...provider,connectionMessage:access.isOwner?provider.connectionMessage:undefined,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
   }
   async settings(user:string,project:string,raw:unknown) {
     const r=objectInput(raw);assertKeys(r,['enabled']);if(typeof r.enabled!=='boolean')throw new BadRequestException('Укажите состояние встроенной LLM');
