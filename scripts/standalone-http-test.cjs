@@ -10,7 +10,7 @@ async function run(args) {
  try {
   if(process.argv.includes('--embedded')){
    const {PGlite}=require('@electric-sql/pglite');const {PGLiteSocketServer}=await import('@electric-sql/pglite-socket');
-   embedded=await PGlite.create();socket=new PGLiteSocketServer({db:embedded,port:0,host:'127.0.0.1',maxConnections:1});await socket.start();
+   embedded=await PGlite.create();socket=new PGLiteSocketServer({db:embedded,port:0,host:'127.0.0.1',maxConnections:4});await socket.start();
    process.env.DATABASE_URL='postgresql://postgres:postgres@'+socket.getServerConn()+'/postgres';
   }
   assert.ok(process.env.DATABASE_URL,'Use an isolated docgrid_test database');
@@ -24,7 +24,7 @@ async function run(args) {
   const {PrismaService}=require('../dist/prisma/prisma.service');
   app=await require('../dist/server').createApplication();console.log('App initialized');await app.listen(0,'127.0.0.1');console.log('App listening');db=app.get(PrismaService);
   const base=await app.getUrl();console.log('Acceptance target',base,'DB',new URL(process.env.DATABASE_URL).host);
-  const timeout=setTimeout(()=>{console.error('HTTP acceptance timeout');process.exit(1)},60000);timeout.unref();
+  const timeout=setTimeout(()=>{console.error('HTTP acceptance timeout');process.exit(1)},120000);timeout.unref();
   function jwt(sub){const h=Buffer.from(JSON.stringify({alg:'HS256'})).toString('base64url');const p=Buffer.from(JSON.stringify({sub,email:sub+'@example.test',role:'USER',plan:'pro',typ:'docgrid_access',iss:'ai-orchestra',aud:'legal-core-docgrid',exp:Math.floor(Date.now()/1000)+300})).toString('base64url');return `${h}.${p}.${createHmac('sha256','a'.repeat(64)).update(`${h}.${p}`).digest('base64url')}`;}
   async function call(path,method='GET',body,token=jwt('owner'),status=200){const r=await fetch(base+path,{signal:AbortSignal.timeout(10000),method,headers:{...(token?{authorization:'Bearer '+token}:{}),...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const t=await r.text();assert.equal(r.status,status,t);return t?JSON.parse(t):null;}
   assert.equal((await call('/health')).service,'docgrid-back');assert.equal((await call('/ready')).status,'ready');
@@ -45,8 +45,10 @@ async function run(args) {
   const catalog=await call('/api/docgrid/agents/catalog?projectId='+p.id,'GET',undefined,grant.token);assert.ok(catalog.tools.length);
   const mcp=await call('/api/docgrid/mcp/'+p.id,'POST',{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},grant.token);assert.ok(mcp.result?.tools?.length,JSON.stringify(mcp));
   await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});
+  await require('./ocr-search-acceptance.cjs')({call,prefix,p,material,jwt,db,app});
   const tables=await db.$queryRaw`SELECT table_schema,table_name FROM information_schema.tables WHERE table_name IN ('workspace_projects','User','_prisma_migrations') AND table_schema IN ('public','docgrid')`;
   assert.ok(tables.length>=3);assert.ok(tables.every(t=>t.table_schema==='docgrid'),JSON.stringify(tables));
   clearTimeout(timeout);passed=true;console.log('PASS standalone HTTP + real Prisma: SSO, forged headers rejected, project isolation, nested upload/download, draft, Home, agent grants, MCP, isolated schema and repeatable migrations; no Legal Core');
  }finally{await app?.close();await socket?.stop();await embedded?.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
+

@@ -1,3 +1,4 @@
+import { isOcrMaterial } from './docgrid-ocr';
 import { ForbiddenException, BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { mergeText } from './docgrid-merge';
@@ -996,9 +997,33 @@ export class DocGridService {
     return {id:row.id,title:row.title,mime:row.mime,sha256:row.sha256,bytes:await readMaterialBytes(row,this.materialStorage)};
   }
 
+  async extractionStatus(user:string,project:string) {
+    await this.requireRepo(this.prisma,user,project);
+    const jobs=await this.prisma.$queryRaw<any[]>`SELECT j.material_id AS id,m.title,m.path,j.state,j.reason,j.total_pages AS "totalPages",
+      (SELECT count(*)::int FROM docgrid.dg_ocr_pages p WHERE p.material_id=m.id) AS "processedPages",
+      (SELECT count(*)::int FROM docgrid.dg_ocr_pages p WHERE p.material_id=m.id AND p.status<>'READY') AS "unreadPages"
+      FROM docgrid.docgrid_materials m JOIN docgrid.dg_ocr_jobs j ON j.material_id=m.id WHERE m.project_id=${project}::uuid AND m.deleted_at IS NULL ORDER BY m.path,m.title LIMIT 5000`;
+    return {enabled:process.env.DOCGRID_OCR_ENABLED!=='false',jobs};
+  }
+  async retryOcr(user:string,project:string,id:string) {
+    return this.prisma.$transaction(async tx=>{
+      await this.requireRepo(tx,user,project,'write');
+      const rows=await tx.$queryRaw<any[]>`SELECT title,sha256 FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL FOR UPDATE`;
+      if(!rows[0])throw new NotFoundException('Материал не найден');
+      if(!isOcrMaterial(rows[0].title))throw new BadRequestException('OCR поддерживает PDF и изображения');
+      const running=await tx.$queryRaw<any[]>`SELECT state,lease_until FROM docgrid.dg_ocr_jobs WHERE material_id=${id}::uuid FOR UPDATE`;
+      if(running[0]?.state==='running' && new Date(running[0].lease_until)>new Date())throw new ConflictException('OCR уже выполняется');
+      await tx.$executeRaw`INSERT INTO docgrid.dg_ocr_jobs(material_id,sha256) VALUES(${id}::uuid,${rows[0].sha256})
+        ON CONFLICT(material_id) DO UPDATE SET state='queued',attempts=0,lease_token=NULL,lease_until=NULL,reason=NULL,updated_at=now()`;
+      await tx.$executeRaw`DELETE FROM docgrid.dg_ocr_pages WHERE material_id=${id}::uuid AND status<>'READY'`;
+      await this.event(tx,project,user,'material.ocr_queued','material',id,{});
+      return {queued:true};
+    });
+  }
+
   async materialText(user:string,project:string,id:string) {
     await this.requireRepo(this.prisma,user,project);
-    const rows=await this.prisma.$queryRaw<any[]>`SELECT extracted_text AS text,extraction_status AS status,extraction_reason AS reason FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    const rows=await this.prisma.$queryRaw<any[]>`SELECT extracted_text AS text,extracted_pages AS pages,extraction_status AS status,extraction_reason AS reason FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
     if(!rows[0])throw new NotFoundException('Материал не найден');
     return rows[0];
   }
@@ -1006,7 +1031,10 @@ export class DocGridService {
     await this.requireRepo(this.prisma,user,project,'write');
     const metadata=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
     if(!metadata[0])throw new NotFoundException('Материал не найден');
+    const type=await this.prisma.$queryRaw<any[]>`SELECT title FROM docgrid.docgrid_materials WHERE id=${id}::uuid`;
+    if(isOcrMaterial(type[0].title)){await this.retryOcr(user,project,id);return {...await this.materialText(user,project,id),queued:true};}
     if(Number(metadata[0].byte_size)>PDF_EXTRACTION_MAX_BYTES)throw new BadRequestException('Повторная обработка ограничена файлами до 32 МБ. Оригинал и имеющийся текст сохранены.');
+
     const original=await this.material(user,project,id);
     const extracted=await extractMaterialText(original.title,Buffer.from(original.bytes));
     // A busy parser must never erase previously available text.

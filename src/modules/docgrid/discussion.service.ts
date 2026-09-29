@@ -97,11 +97,40 @@ export class DiscussionService {
       while(snapshot.continuation){snapshot=await call('docgrid_get_snapshot',{snapshotId,cursor:snapshot.continuation,limit:200});manifest.push(...snapshot.manifest);}
       if(selected?.some(sourceId=>!manifest.some(s=>s.sourceId===sourceId)))throw new BadRequestException('Выбранный файл недоступен в рамках этого доступа');
       let candidates=manifest.filter(s=>(selected===null||selected.includes(s.sourceId))&&(!folder||folder==='/'||s.path===folder||s.path.startsWith(folder+'/')));
-      // Explicit literal search: do not claim semantic retrieval or complete project reading.
-      if(query){let hit=await call('docgrid_search',{snapshotId,query,limit:50});const ids=new Set<string>(hit.matches.map((m:any)=>m.sourceRef.sourceId));while(hit.continuation){hit=await call('docgrid_search',{snapshotId,query,limit:50,cursor:hit.continuation});hit.matches.forEach((m:any)=>ids.add(m.sourceRef.sourceId));}candidates=candidates.filter(s=>ids.has(s.sourceId));}
-      const batch=candidates.slice(offset,offset+20),sources:ChatSource[]=[],refs:any[]=[],coverage:any[]=[];
-      for(const s of batch){const read=await call('docgrid_read_source',{sourceRef:s.sourceRef,maxChars:5000});sources.push({id:s.sourceId,title:s.title,path:s.path,text:read.text,status:read.truncated?'PARTIAL':read.status});refs.push(s.sourceRef);coverage.push({sourceId:s.sourceId,title:s.title,path:s.path,status:read.status,truncated:read.truncated,characters:read.text.length,sourceRef:s.sourceRef});}
-      const context={snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:offset+batch.length<candidates.length?offset+batch.length:null,query:query||null};
+      const sources:ChatSource[]=[],refs:any[]=[],coverage:any[]=[];
+      let retrieval:any=null,batch:any[]=[],used=0;
+      // Rank passages over the entire authorized snapshot; the model receives a bounded evidence bundle.
+      if(query || task!=='sort') {
+        const searchQuery=query || instruction.slice(0,200);
+        const args={snapshotId,query:searchQuery,mode:'ranked',limit:50,...(selected===null?{}:{sourceIds:selected}),...(folder?{path:folder}:{})};
+        let hit=await call('docgrid_search',args),rounds=0;
+        const grouped=new Map<string,{source:any;text:string;passages:any[]}>();
+        do {
+          for(const match of hit.matches) {
+            const source=candidates.find(s=>s.sourceId===match.sourceRef.sourceId);if(!source)continue;
+            let group=grouped.get(source.sourceId);
+            if(!group) {if(grouped.size>=20)continue;group={source,text:'',passages:[]};grouped.set(source.sourceId,group);}
+            if(group.passages.some(p=>p.start===match.locator.start)||group.text.length+match.snippet.length+2>11000||used+match.snippet.length+2>95000)continue;
+            group.text+=(group.text?'\n\n':'')+match.snippet;used+=match.snippet.length+2;
+            group.passages.push({page:match.page,start:match.locator.start,end:match.locator.end,sourceRef:match.sourceRef});
+          }
+          rounds++;
+          if(!hit.continuation||rounds>=3||grouped.size>=20||used>=90000)break;
+          hit=await call('docgrid_search',{...args,cursor:hit.continuation});
+        }while(true);
+        retrieval={algorithm:'russian-simple-passages-v1',query:searchQuery,index:hit.index,matchedSources:grouped.size,bounded:true};
+        for(const {source,text,passages} of grouped.values()) {
+          sources.push({id:source.sourceId,title:source.title,path:source.path,text,status:'PARTIAL'});refs.push(source.sourceRef);
+          coverage.push({sourceId:source.sourceId,title:source.title,path:source.path,status:source.status,truncated:true,characters:text.length,sourceRef:source.sourceRef,passages});
+        }
+      }
+      // Sorting is deliberately batched. A broad question without search hits gets a labelled sample.
+      if(!sources.length && !query) {
+        batch=candidates.slice(offset,offset+20);
+        for(const s of batch){const read=await call('docgrid_read_source',{sourceRef:s.sourceRef,maxChars:5000});sources.push({id:s.sourceId,title:s.title,path:s.path,text:read.text,status:read.truncated?'PARTIAL':read.status});refs.push(s.sourceRef);coverage.push({sourceId:s.sourceId,title:s.title,path:s.path,status:read.status,truncated:read.truncated,characters:read.text.length,sourceRef:s.sourceRef});}
+        if(retrieval)retrieval.fallback='first-source-sample-no-search-hits';
+      }
+      const context={snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
       await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET context=${JSON.stringify(context)}::jsonb WHERE id=${turnId}::uuid`;
       const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' ORDER BY created_at DESC LIMIT 4`;
       const token=process.env.DOCGRID_SERVICE_TOKEN||'',base=process.env.DOCGRID_ORCHESTRA_URL||'';
