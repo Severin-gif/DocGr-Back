@@ -1,3 +1,4 @@
+import { passages } from '../docgrid-passages';
 import { DocGridMaterialStorageService, readMaterialBytes } from '../docgrid-material-storage.service';
 import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
@@ -11,7 +12,7 @@ export const ASTRA_SOURCE_TOOLS = [
 ] as const;
 
 type Entry = { id: string; kind: 'material' | 'document' | 'artifact' | 'folder'; title: string; path: string; version: string; hash: string | null; size: number; textSize?: number; status?: string; extractionFingerprint?: string | null };
-type Source = { sourceId: string; kind: 'material' | 'document' | 'artifact'; version: string; hash: string; extractionRevision: string; status: 'READY' | 'PARTIAL' | 'UNREAD' | 'FAILED'; title: string; path: string; mime: string; byteSize: number; content: string; warnings: string[] };
+type Source = { sourceId: string; kind: 'material' | 'document' | 'artifact'; version: string; hash: string; extractionRevision: string; status: 'READY' | 'PARTIAL' | 'UNREAD' | 'FAILED'; title: string; path: string; mime: string; byteSize: number; content: string; warnings: string[]; pages?: any[] };
 type Snapshot = { id: string; projectId: string; grantId: string; treeRevision: string; manifest: { entries: Entry[]; relations: unknown[] }; cursorSecret: string; createdAt: Date };
 export type AstraSourceRef = { snapshotId: string; sourceId: string; version: string; hash: string; locator?: { kind: 'text_range'; unit: 'utf16'; start: number; end: number } };
 type StructureChange = { action: 'move_source' | 'rename_source' | 'create_folder' | 'remove_empty_folder'; sourceId?: string; path?: string; title?: string };
@@ -50,7 +51,7 @@ export class AstraSourcesService {
     const ids = ctx.allowedSourceIds === null ? null : JSON.stringify(ctx.allowedSourceIds);
     const entries = await tx.$queryRaw<Entry[]>`
       SELECT id,'material' AS kind,title,path,sha256::text AS version,sha256::text AS hash,
-        byte_size::int AS size,octet_length(extracted_text)::int AS "textSize",extraction_status AS status,encode(sha256(convert_to(extracted_text,'UTF8')),'hex') AS "extractionFingerprint"
+        byte_size::int AS size,octet_length(extracted_text)::int AS "textSize",extraction_status AS status,encode(sha256(convert_to(extracted_text || extracted_pages::text,'UTF8')),'hex') AS "extractionFingerprint"
       FROM docgrid.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND deleted_at IS NULL
         AND (${ids}::jsonb IS NULL OR id::text IN (SELECT jsonb_array_elements_text(${ids}::jsonb)))
       UNION ALL
@@ -120,7 +121,7 @@ export class AstraSourcesService {
     } else {
       if (input.capture !== true || input.cursor) throw new BadRequestException({ code: 'EXPLICIT_SNAPSHOT_CAPTURE_REQUIRED' });
       const tree = await this.liveTree(tx, ctx);
-      if (tree.entries.reduce((n, e) => n + (e.textSize || 0), 0) > 32 * 1024 * 1024) throw new BadRequestException({ code: 'SNAPSHOT_TEXT_LIMIT', maxBytes: 32 * 1024 * 1024 });
+      if (tree.entries.reduce((n, e) => n + (e.textSize || 0), 0) > 128 * 1024 * 1024) throw new BadRequestException({ code: 'SNAPSHOT_TEXT_LIMIT', maxBytes: 128 * 1024 * 1024 });
       const existing = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM docgrid.dg_astra_snapshots WHERE project_id=${ctx.projectId}::uuid AND grant_id=${ctx.grantId}::uuid AND tree_revision=${tree.revision} LIMIT 1`;
       if (existing[0]) {
         snapshot = await this.loadSnapshot(tx, ctx, existing[0].id);
@@ -131,15 +132,15 @@ export class AstraSourcesService {
         COALESCE(sum(octet_length(s.content)),0)::text AS bytes FROM docgrid.dg_astra_snapshot_sources s
         JOIN docgrid.dg_astra_snapshots p ON p.id=s.snapshot_id WHERE p.project_id=${ctx.projectId}::uuid`;
       const nextBytes = tree.entries.reduce((n, e) => n + (e.textSize || 0), 0);
-      if (retained[0].snapshots >= 64 || Number(retained[0].bytes) + nextBytes > 128 * 1024 * 1024) throw new BadRequestException({ code: 'SNAPSHOT_RETENTION_LIMIT', maxSnapshots: 64, maxTextBytes: 128 * 1024 * 1024 });
+      if (retained[0].snapshots >= 64 || Number(retained[0].bytes) + nextBytes > 512 * 1024 * 1024) throw new BadRequestException({ code: 'SNAPSHOT_RETENTION_LIMIT', maxSnapshots: 64, maxTextBytes: 512 * 1024 * 1024 });
       const rows = await tx.$queryRaw<Snapshot[]>`INSERT INTO docgrid.dg_astra_snapshots(project_id,grant_id,tree_revision,manifest,cursor_secret)
         VALUES(${ctx.projectId}::uuid,${ctx.grantId}::uuid,${tree.revision},${JSON.stringify({ entries: tree.entries, relations: tree.relations })}::jsonb,${randomBytes(32).toString('hex')})
         RETURNING id,project_id AS "projectId",grant_id AS "grantId",tree_revision AS "treeRevision",manifest,cursor_secret AS "cursorSecret",created_at AS "createdAt"`;
       snapshot = rows[0];
       for (const entry of tree.entries.filter(e => e.kind !== 'folder')) {
         const source = await this.captureSource(tx, ctx, entry);
-        await tx.$executeRaw`INSERT INTO docgrid.dg_astra_snapshot_sources(snapshot_id,source_id,kind,version,hash,extraction_revision,status,title,path,mime,byte_size,content,warnings)
-          VALUES(${snapshot.id}::uuid,${entry.id}::uuid,${source.kind},${source.version},${source.hash},${source.extractionRevision},${source.status},${source.title},${source.path},${source.mime},${source.byteSize},${source.content},${JSON.stringify(source.warnings)}::jsonb)`;
+        await tx.$executeRaw`INSERT INTO docgrid.dg_astra_snapshot_sources(snapshot_id,source_id,kind,version,hash,extraction_revision,status,title,path,mime,byte_size,content,warnings,pages)
+          VALUES(${snapshot.id}::uuid,${entry.id}::uuid,${source.kind},${source.version},${source.hash},${source.extractionRevision},${source.status},${source.title},${source.path},${source.mime},${source.byteSize},${source.content},${JSON.stringify(source.warnings)}::jsonb,${JSON.stringify(source.pages || [])}::jsonb)`;
       }
       await this.event(tx, ctx, 'astra.snapshot.captured', { snapshotId: snapshot.id, treeRevision: tree.revision, sources: tree.entries.filter(e => e.kind !== 'folder').length });
       }
@@ -153,7 +154,7 @@ export class AstraSourcesService {
       WHERE snapshot_id=${snapshot.id}::uuid AND (${allowed}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${allowed}::jsonb))) ORDER BY source_id LIMIT ${limit + 1} OFFSET ${offset}`;
     const more = sources.length > limit;
     return { output: { snapshotId: snapshot.id, treeRevision: snapshot.treeRevision, createdAt: snapshot.createdAt,
-      manifest: sources.slice(0, limit).map(s => ({ ...s, sourceRef: { snapshotId: snapshot.id, sourceId: s.sourceId, version: s.version, hash: s.hash }, sourceIntegrity: 'verified_at_capture' })),
+      manifest: sources.slice(0, limit).map(s => ({ ...s, sourceRef: { snapshotId: snapshot.id, sourceId: s.sourceId, version: s.version, hash: s.hash }, sourceIntegrity: 'stored_revision_pinned_original_verified_on_download' })),
       truncated: more, continuation: more ? makeCursor(snapshot.cursorSecret, bind, offset + limit) : null,
       stages: { captured: true, delivered: 'manifest_only', understood: false } } };
   }
@@ -161,18 +162,20 @@ export class AstraSourcesService {
   private async captureSource(tx: AstraDb, ctx: AstraContext, entry: Entry): Promise<Source> {
     scopeSource(ctx.allowedSourceIds, entry.id);
     if (entry.kind === 'material') {
-      const rows = await tx.$queryRaw<any[]>`SELECT sha256,bytes,storage_key,byte_size,extracted_text AS content,extraction_status AS status,mime FROM docgrid.docgrid_materials
+      const rows = await tx.$queryRaw<any[]>`SELECT sha256,byte_size,extracted_text AS content,extracted_pages AS pages,extraction_status AS status,mime,encode(sha256(convert_to(extracted_text || extracted_pages::text,'UTF8')),'hex') AS fingerprint FROM docgrid.docgrid_materials
         WHERE id=${entry.id}::uuid AND project_id=${ctx.projectId}::uuid AND deleted_at IS NULL`;
       const row = rows[0];
       if (!row || row.sha256 !== entry.version) throw new ConflictException({ code: 'SOURCE_INTEGRITY_FAILED', sourceId: entry.id });
-      await readMaterialBytes(row, this.materialStorage);
+      if(row.fingerprint!==entry.extractionFingerprint || row.status!==entry.status)throw new ConflictException({code:'SOURCE_EXTRACTION_CHANGED',sourceId:entry.id});
+      // Upload/OCR/download verify original bytes. Search pins the stored extraction revision
+      // without downloading the entire case from S3 under a database transaction.
       const status = ['READY', 'PARTIAL', 'UNREAD', 'FAILED'].includes(row.status) ? row.status : 'UNREAD';
       const content = ['READY', 'PARTIAL'].includes(status) ? row.content : '';
       return { sourceId: entry.id, kind: 'material', version: row.sha256, hash: row.sha256, extractionRevision: sha256(content),
-        status, title: entry.title, path: entry.path, mime: row.mime, byteSize: entry.size, content,
+        status, title: entry.title, path: entry.path, mime: row.mime, byteSize: entry.size, content, pages: row.pages || [],
         warnings: [ ...(status === 'PARTIAL' ? ['Existing extraction is incomplete; continuation covers extracted text only'] : []),
           ...(['UNREAD', 'FAILED'].includes(status) ? ['No readable extraction; original remains unchanged'] : []),
-          'Legacy extractor supplies text offsets only; PDF page, DOCX paragraph and sheet/cell locators are unavailable' ] };
+          ...(row.pages?.length ? ['OCR text may contain recognition errors; verify amounts and names against original pages'] : ['Page locators unavailable for this extraction']) ] };
     }
     if (entry.kind === 'artifact') {
       const rows = await tx.$queryRaw<any[]>`SELECT v.plain_text AS content FROM docgrid.document_versions v JOIN docgrid.dg_astra_documents b ON b.document_id=v.document_id
@@ -194,7 +197,7 @@ export class AstraSourcesService {
 
   private async source(tx: AstraDb, ctx: AstraContext, snapshotId: string, sourceId: string): Promise<Source> {
     scopeSource(ctx.allowedSourceIds, sourceId);
-    const rows = await tx.$queryRaw<Source[]>`SELECT source_id AS "sourceId",kind,version,hash,extraction_revision AS "extractionRevision",status,title,path,mime,byte_size::int AS "byteSize",content,warnings
+    const rows = await tx.$queryRaw<Source[]>`SELECT source_id AS "sourceId",kind,version,hash,extraction_revision AS "extractionRevision",status,title,path,mime,byte_size::int AS "byteSize",content,warnings,pages
       FROM docgrid.dg_astra_snapshot_sources s JOIN docgrid.dg_astra_snapshots p ON p.id=s.snapshot_id
       WHERE s.snapshot_id=${snapshotId}::uuid AND s.source_id=${sourceId}::uuid AND p.project_id=${ctx.projectId}::uuid `;
     if (!rows[0]) throw new NotFoundException({ code: 'SOURCE_NOT_FOUND' });
@@ -258,40 +261,73 @@ export class AstraSourcesService {
 
   private async read(tx: AstraDb, ctx: AstraContext, input: Record<string, unknown>) {
     strictKeys(input, ['sourceRef', 'cursor', 'maxChars', 'start']);
-    strictKeys(input.sourceRef, ['snapshotId', 'sourceId', 'version', 'hash']);
+    strictKeys(input.sourceRef, ['snapshotId', 'sourceId', 'version', 'hash', 'locator']);
     const snapshotId = idField(input.sourceRef, 'snapshotId');
     const [ref] = await this.validateSourceRefs(tx, ctx, snapshotId, [input.sourceRef]);
     const snapshot = await this.loadSnapshot(tx, ctx, snapshotId);
     const source = await this.source(tx, ctx, snapshotId, ref.sourceId);
     const maxChars = boundedInt(input, 'maxChars', 8000, 2, 20000);
     if (input.cursor && input.start !== undefined) throw new BadRequestException({ code: 'AMBIGUOUS_LOCATOR' });
-    const binding = this.binding(ctx, snapshot, 'read', { sourceId: source.sourceId, version: source.version, hash: source.hash, extractionRevision: source.extractionRevision, maxChars });
-    const start = input.cursor ? readCursor(snapshot.cursorSecret, binding, input.cursor) : boundedInt(input, 'start', 0, 0, source.content.length);
-    const part = sliceSource(source.content, start, maxChars);
+    const binding = this.binding(ctx, snapshot, 'read', { sourceId: source.sourceId, version: source.version, hash: source.hash, extractionRevision: source.extractionRevision, maxChars, locator: ref.locator || null });
+    const start = input.cursor ? readCursor(snapshot.cursorSecret, binding, input.cursor) : boundedInt(input, 'start', ref.locator?.start || 0, ref.locator?.start || 0, ref.locator?.end ?? source.content.length);
+    const part = sliceSource(source.content.slice(0, ref.locator?.end ?? source.content.length), start, maxChars);
     return { output: { ...part, sourceRef: ref, status: source.status, hash: source.hash, extractionRevision: source.extractionRevision,
-      extractionMethod: source.kind !== 'material' ? 'workspace-version-text' : 'legacy-stored-extraction', warnings: source.warnings,
+      extractionMethod: source.kind !== 'material' ? 'workspace-version-text' : source.pages?.length ? 'page-native-or-ocr' : 'legacy-stored-extraction', warnings: source.warnings,
+      pages: (source.pages || []).filter(p=>p.end>start && p.start<part.locator.end),
       continuation: part.truncated ? makeCursor(snapshot.cursorSecret, binding, part.locator.end) : null,
       coverage: { unit: 'utf16', deliveredStart: start, deliveredEnd: part.locator.end, extractedCharacters: source.content.length, sourceComplete: source.status === 'READY', understood: false },
       untrustedContent: true } };
   }
 
   private async search(tx: AstraDb, ctx: AstraContext, input: Record<string, unknown>) {
-    strictKeys(input, ['snapshotId', 'query', 'mode', 'sourceIds', 'cursor', 'limit']);
+    strictKeys(input, ['snapshotId', 'query', 'mode', 'sourceIds', 'path', 'cursor', 'limit']);
     const snapshot = await this.loadSnapshot(tx, ctx, idField(input, 'snapshotId'));
     const query = textField(input, 'query', 200);
     const mode = input.mode === undefined ? 'fulltext' : input.mode;
-    if (!['fulltext', 'filename'].includes(mode as string)) throw new BadRequestException({ code: 'INVALID_SEARCH_MODE' });
+    if (!['fulltext', 'filename', 'ranked'].includes(mode as string)) throw new BadRequestException({ code: 'INVALID_SEARCH_MODE' });
     let sourceIds: string[] | null = ctx.allowedSourceIds;
     if (input.sourceIds !== undefined) {
-      if (!Array.isArray(input.sourceIds) || input.sourceIds.length > 100) throw new BadRequestException({ code: 'INVALID_SOURCE_SCOPE' });
+      if (!Array.isArray(input.sourceIds) || input.sourceIds.length > 500) throw new BadRequestException({ code: 'INVALID_SOURCE_SCOPE' });
       sourceIds = input.sourceIds.map(sourceId => idField({ sourceId }, 'sourceId'));
       for (const id of sourceIds) { scopeSource(ctx.allowedSourceIds, id); await this.source(tx, ctx, snapshot.id, id); }
     }
     const limit = boundedInt(input, 'limit', 20, 1, 50);
-    const binding = this.binding(ctx, snapshot, 'search', { query, mode, sourceIds, limit });
+    const path=input.path===undefined?'/':normalizedPath(input.path);
+    const binding = this.binding(ctx, snapshot, 'search', { query, mode, sourceIds, limit, path });
     const offset = input.cursor ? readCursor(snapshot.cursorSecret, binding, input.cursor) : 0;
     const scope = sourceIds === null ? null : JSON.stringify(sourceIds);
-    // Literal substring search, not SQL wildcard interpretation. One bounded hit per source.
+    if(mode==='ranked') {
+      // Lazily index immutable snapshots, including ones captured before this migration.
+      const pending=await tx.$queryRaw<any[]>`SELECT source_id FROM docgrid.dg_astra_snapshot_sources s
+        WHERE snapshot_id=${snapshot.id}::uuid AND status IN ('READY','PARTIAL') AND content<>''
+        AND (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb)))
+        AND NOT EXISTS(SELECT 1 FROM docgrid.dg_search_passages p WHERE p.snapshot_id=s.snapshot_id AND p.source_id=s.source_id)`;
+      for(const pendingSource of pending) {
+        const [source]=await tx.$queryRaw<any[]>`SELECT source_id,content,pages FROM docgrid.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND source_id=${pendingSource.source_id}::uuid`;
+        const parts=passages(source.content,source.pages);
+        await tx.$executeRaw`INSERT INTO docgrid.dg_search_passages(snapshot_id,source_id,ordinal,start_offset,end_offset,page,content)
+          SELECT ${snapshot.id}::uuid,${source.source_id}::uuid,x.ordinal,x.start,x.end,x.page,x.text
+          FROM jsonb_to_recordset(${JSON.stringify(parts)}::jsonb) AS x(ordinal int,start int,"end" int,page int,text text) ON CONFLICT DO NOTHING`;
+      }
+      const matches=await tx.$queryRaw<any[]>`WITH q AS (SELECT
+        replace(plainto_tsquery('russian',${query})::text,' & ',' | ')::tsquery ||
+        replace(plainto_tsquery('simple',regexp_replace(${query},'[А-Яа-яЁё]+','','g'))::text,' & ',' | ')::tsquery AS value)
+        SELECT s.source_id AS "sourceId",s.version,s.hash,s.kind,s.title,s.path,s.status,p.page,p.start_offset AS start,p.end_offset AS end,p.content AS snippet,
+        ts_rank_cd(p.search_vector,q.value) AS rank
+        FROM docgrid.dg_search_passages p JOIN docgrid.dg_astra_snapshot_sources s USING(snapshot_id,source_id) CROSS JOIN q
+        WHERE p.snapshot_id=${snapshot.id}::uuid AND p.search_vector @@ q.value
+        AND (${scope}::jsonb IS NULL OR s.source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb)))
+        AND (${path}='/' OR s.path=${path} OR left(s.path,length(${path})+1)=${path}||'/')
+        ORDER BY rank DESC,s.source_id,p.ordinal LIMIT ${limit+1} OFFSET ${offset}`;
+      const stats=await tx.$queryRaw<any[]>`SELECT status,count(*)::int AS count FROM docgrid.dg_astra_snapshot_sources
+        WHERE snapshot_id=${snapshot.id}::uuid AND (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb)))
+        AND (${path}='/' OR path=${path} OR left(path,length(${path})+1)=${path}||'/') GROUP BY status`;
+      return {output:{mode,algorithm:'russian-simple-passages-v1',snapshotId:snapshot.id,index:{complete:stats.every(s=>s.status==='READY'),statuses:stats,coverage:'all authorized stored extraction',zeroResultsProveAbsence:false},
+        matches:matches.slice(0,limit).map(s=>({sourceRef:{snapshotId:snapshot.id,sourceId:s.sourceId,version:s.version,hash:s.hash,locator:{kind:'text_range',unit:'utf16',start:s.start,end:s.end}},
+          kind:s.kind,version:s.version,title:s.title,path:s.path,status:s.status,snippet:s.snippet,page:s.page,rank:s.rank,locator:{kind:'text_range',unit:'utf16',start:s.start,end:s.end},untrustedContent:true})),
+        truncated:matches.length>limit,continuation:matches.length>limit?makeCursor(snapshot.cursorSecret,binding,offset+limit):null}};
+    }
+    // Literal search remains available for exact names/numbers and existing clients.
     const rows = await tx.$queryRaw<any[]>`SELECT source_id AS "sourceId",version,hash,status,title,content,extraction_revision AS "extractionRevision"
       FROM docgrid.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND
       (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb))) AND
@@ -526,13 +562,13 @@ export const ASTRA_SOURCE_SCHEMAS: Record<string, { description: string; inputSc
   docgrid_get_snapshot: sourceSchema('Read an immutable, scope-filtered manifest. To create one explicitly supply capture:true with no snapshotId; captures are audited writes.', {
     snapshotId: uuidSchema, capture: { type: 'boolean' }, cursor: cursorSchema, limit: pageSchema,
   }),
-  docgrid_read_source: sourceSchema('Bounded untrusted source text, exact UTF-16 ranges and continuation. READY is extraction status, not model understanding. Native PDF/page and spreadsheet/cell locators are unavailable.', {
+  docgrid_read_source: sourceSchema('Bounded untrusted source text, exact UTF-16 ranges and continuation. READY is extraction status, not model understanding. Page metadata is supplied for page-indexed PDF/images. Other formats have UTF-16 locators.', {
     sourceRef: sourceRefSchema, cursor: cursorSchema, maxChars: { type: 'integer', minimum: 2, maximum: 20000, default: 8000 }, start: { type: 'integer', minimum: 0 },
   }, ['sourceRef']),
   docgrid_get_source_original: sourceSchema('Retrieve a protected URL for the exact immutable uploaded original, including UNREAD formats. Original SHA-256 is rechecked; maximum 32 MiB. Canonical documents use version export instead.', { sourceRef: { ...sourceRefSchema, properties: { snapshotId: uuidSchema, sourceId: uuidSchema, version: { type: 'string' }, hash: { type: 'string', pattern: '^[a-f0-9]{64}$' } } } }, ['sourceRef']),
-  docgrid_search: sourceSchema('Literal substring search over pinned stored extraction or filenames; one bounded hit per source. Reports incomplete index coverage.', {
-    snapshotId: uuidSchema, query: { type: 'string', minLength: 1, maxLength: 200 }, mode: { type: 'string', enum: ['fulltext', 'filename'], default: 'fulltext' },
-    sourceIds: { type: 'array', maxItems: 100, items: uuidSchema }, cursor: cursorSchema, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
+  docgrid_search: sourceSchema('Search pinned project extraction: ranked finds Russian/English word forms across all source passages with page and UTF-16 locators; fulltext is literal; filename searches names. Reports unread coverage. Paginate to retrieve remaining matches.', {
+    snapshotId: uuidSchema, query: { type: 'string', minLength: 1, maxLength: 200 }, mode: { type: 'string', enum: ['fulltext', 'filename', 'ranked'], default: 'fulltext' },
+    sourceIds: { type: 'array', maxItems: 500, items: uuidSchema }, path: {type:'string',maxLength:500}, cursor: cursorSchema, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
   }, ['snapshotId', 'query']),
   docgrid_get_source_history: sourceSchema('List source versions no newer than the selected snapshot; original materials have one immutable version.', {
     snapshotId: uuidSchema, sourceId: uuidSchema, beforeVersion: { type: 'integer', minimum: 1 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
@@ -554,4 +590,5 @@ export const ASTRA_SOURCE_SCHEMAS: Record<string, { description: string; inputSc
     currency: { type: 'string', minLength: 1, maxLength: 12 }, unit: { type: 'string', minLength: 1, maxLength: 50 }, period: { type: 'string', minLength: 1, maxLength: 100 }, duplicatePolicy: { enum: ['reject', 'include'], default: 'reject' },
   }, ['rows', 'currency', 'unit', 'period']),
 };
+
 

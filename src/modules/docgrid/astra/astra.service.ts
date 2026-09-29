@@ -295,6 +295,20 @@ export class AstraService {
     },{maxWait:10000,timeout:60000});
   }
   private humanContext(ownerId:string,projectId:string):AstraContext{return {operationId:randomUUID(),projectId,ownerId,grantId:'',agentRef:'human',runId:'human-read',requestKey:randomUUID(),traceId:randomUUID(),allowedSourceIds:null,principalKind:'human'};}
+  async humanSearch(user:string,projectId:string,raw:unknown) {
+    const input=objectInput(raw);assertKeys(input,['query','snapshotId','cursor']);
+    const query=stringInput(input,'query',200);
+    if(input.cursor && !input.snapshotId)throw new BadRequestException('Для продолжения нужен снимок поиска');
+    return this.prisma.$transaction(async tx=>{
+      await this.requireProject(tx,user,projectId);
+      // Authenticated human search uses project ACL, independently of LLM settings.
+      // projectId is an internal snapshot namespace, never an issued agent credential.
+      const ctx={...this.humanContext(user,projectId),grantId:projectId};
+      const snapshotId=input.snapshotId?uuidInput(input,'snapshotId'):
+        ((await this.sources.execute(tx,ctx,'docgrid_get_snapshot',{capture:true,limit:1})).output as any).snapshotId;
+      return (await this.sources.execute(tx,ctx,'docgrid_search',{snapshotId,query,mode:'ranked',limit:20,...(input.cursor?{cursor:stringInput(input,'cursor',4096)}:{})})).output;
+    },{timeout:90000});
+  }
   async humanArtifact(ownerId:string,projectId:string,artifactId:string,version?:number) {
     return this.prisma.$transaction(async tx=>{await this.requireProject(tx,ownerId,projectId);const result=await this.workflow.execute(tx,this.humanContext(ownerId,projectId),version===undefined?'docgrid_get_history':'docgrid_get_artifact',version===undefined?{artifactId}:{artifactId,version});return result.output;});
   }
