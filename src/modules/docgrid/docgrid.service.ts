@@ -2,7 +2,7 @@ import { ForbiddenException, BadGatewayException, BadRequestException, ConflictE
 import { Prisma } from '@prisma/client';
 import { mergeText } from './docgrid-merge';
 import { createHash, randomUUID } from 'node:crypto';
-import { extractMaterialText } from './docgrid-material-extraction';
+import { extractMaterialText, PDF_EXTRACTION_MAX_BYTES } from './docgrid-material-extraction';
 import { DocGridMaterialStorageService, readMaterialBytes } from './docgrid-material-storage.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -1004,6 +1004,9 @@ export class DocGridService {
   }
   async reextractMaterial(user:string,project:string,id:string) {
     await this.requireRepo(this.prisma,user,project,'write');
+    const metadata=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    if(!metadata[0])throw new NotFoundException('Материал не найден');
+    if(Number(metadata[0].byte_size)>PDF_EXTRACTION_MAX_BYTES)throw new BadRequestException('Повторная обработка ограничена файлами до 32 МБ. Оригинал и имеющийся текст сохранены.');
     const original=await this.material(user,project,id);
     const extracted=await extractMaterialText(original.title,Buffer.from(original.bytes));
     // A busy parser must never erase previously available text.

@@ -71,6 +71,13 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   task='chat';
   process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT='1';
   await bsend({},429);
+  // Two discussions still share one quota. Their requests cannot race past the last slot.
+  await db.$executeRaw`UPDATE docgrid.dg_ai_daily_usage SET requests=0 WHERE user_id='reader'`;
+  const second=await call(prefix+'/discussions','POST',{title:'Второй чат'},jwt('reader'),201);
+  const race=await Promise.allSettled([bsend(),call(prefix+'/discussions/'+second.id+'/turns','POST',{requestKey:randomUUID(),instruction:'Объясни',mode:'advisor',task:'chat',sourceIds:[material.id]},jwt('reader'),201)]);
+  assert.equal(race.filter(r=>r.status==='fulfilled').length,1);
+  assert.equal(race.find(r=>r.status==='rejected').reason.actual,429);
+  assert.equal((await call(prefix+'/discussions/config','GET',undefined,jwt('reader'))).remaining,0);
   delete process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT;
   const text=await call(prefix+'/materials/'+material.id+'/text','GET',undefined,jwt('reader'));assert.match(text.text,/Original evidence/);
   await call(prefix+'/materials/'+material.id+'/extract','POST',{},jwt('reader'),404);
