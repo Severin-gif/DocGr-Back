@@ -7,6 +7,8 @@ import { DiscussionService } from './discussion.service';
 @Controller('api/docgrid/repositories/:projectId/discussions')
 export class DiscussionController {
   constructor(private readonly discussions:DiscussionService){}
+  @Get('context') context(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string){return this.discussions.projectContext(user,project);}
+  @Post('context/refresh') refreshContext(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string){return this.discussions.refreshContext(user,project);}
   @Get('config') config(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string){return this.discussions.config(user,project);}
   @Put('settings') settings(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Body() body:unknown){return this.discussions.settings(user,project,body);}
   @Get() list(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string){return this.discussions.list(user,project);}

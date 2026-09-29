@@ -1,0 +1,6 @@
+import {test} from 'node:test';
+import {strict as assert} from 'node:assert';
+import {validateContextResult} from './modules/docgrid/project-context.protocol';
+import {validateDiscussionInput,validateDiscussionResult} from './modules/docgrid/discussion.protocol';
+test('memory verifies quotes and remains separate from citable sources',()=>{const result={points:[{text:'Есть долг',quote:'долг 100'}],concerns:[]};assert.deepEqual(validateContextResult(result,'Подтверждён долг 100 рублей'),result);assert.throws(()=>validateContextResult(result,'Долга нет'));const input=validateDiscussionInput({mode:'helper',task:'chat',instruction:'Разберём дело',sources:[],projectContext:{summary:'Есть долг',state:'partial'},history:[]});assert.equal(input.projectContext?.state,'partial');assert.equal(input.sources.length,0);});
+test('follow-up chips only accept supported actions',()=>{const raw={answer:'Уточнить цель',warnings:[],classifications:[],package:null,suggestions:[{task:'instruction',label:'Инструкция',instruction:'Порядок взыскания'}]};assert.equal(validateDiscussionResult(raw,[],'helper').suggestions?.[0].task,'instruction');assert.throws(()=>validateDiscussionResult({...raw,suggestions:[{...raw.suggestions[0],task:'execute'}]},[],'helper'));});

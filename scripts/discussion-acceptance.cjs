@@ -7,6 +7,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   if(req.url==='/internal/docgrid/config'){res.setHeader('content-type','application/json');res.end(JSON.stringify({enabled:true,discussionModels:[{id:'default',label:'Fixture'},{id:'claude',label:'Claude fixture'}]}));return;}
   let body='';for await(const c of req)body+=c;
   const input=JSON.parse(body);calls++;assert.equal(req.headers['x-docgrid-service-token'],'b'.repeat(64));
+  assert.ok(input.projectContext);
   const s=input.sources.find(s=>s.id===material.id);
   const result={answer:'Проверено по тексту',warnings:[],classifications:[],package:null};
   if(task==='sort')result.classifications=[{sourceId:s.id,category:'Доказательства',destination:'/Разобрано',reason:'Подтверждено текстом',confidence:'high',evidence:[{sourceId:s.id,quote:'Original evidence'}]}];
@@ -26,7 +27,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   const send=(extra={},status=201)=>call(root+'/turns','POST',{requestKey:randomUUID(),instruction:'Разбери документы',mode:'helper',task:'sort',sourceIds:[material.id],...extra},jwt('owner'),status);
   const requestKey=randomUUID();const sent=await send({requestKey});
   const repeated=await send({requestKey});assert.equal(sent.id,repeated.id);assert.equal(calls,1);
-  const turns=await call(root+'/turns');assert.equal(turns[0].context.total,1);assert.equal(turns[0].result.classifications[0].sourceId,material.id);
+  const turns=await call(root+'/turns');assert.ok(turns[0].proposalId,'selected action automatically prepares a proposal');assert.equal(turns[0].context.total,1);assert.equal(turns[0].result.classifications[0].sourceId,material.id);
   const proposed=await call(root+'/turns/'+sent.id+'/proposal','POST',{},jwt('owner'),201);
   assert.equal(proposed.status,'needs_user_action');
   assert.equal((await call(prefix+'/files')).materials.find(m=>m.id===material.id).path,'/Case/Nested');
@@ -37,6 +38,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   assert.ok(staleOp);
   const advisor=await send({mode:'advisor'});await call(root+'/turns/'+advisor.id+'/proposal','POST',{},jwt('owner'),400);
   const before=calls;await send({sourceIds:[randomUUID()]},400);assert.equal(calls,before);
+  const general=await send({task:'chat',instruction:'Подготовь инструкцию'});const generalTurn=(await call(root+'/turns')).find(t=>t.id===general.id);assert.equal(generalTurn.context.task,'chat');assert.equal(generalTurn.proposalId,null);assert.deepEqual(generalTurn.result.classifications,[]);
   task='package';const packet=await send({task:'package'});
   const pack=await call(root+'/turns/'+packet.id+'/proposal','POST',{},jwt('owner'),201);assert.equal(pack.result.documents.length,2);
   await call(prefix+'/folders','POST',{path:'/Changed'},jwt('owner'),201);
@@ -53,7 +55,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   await send({task:'instruction',mode:'advisor'},400);
   const originalPath=tree.materials.find(m=>m.id===material.id).path;
   for(let n=0;n<2;n++){
-    const instruction=await send({task:n?'instruction':'chat',instruction:'Подготовь юридическую инструкцию по взысканию'});
+    const instruction=await send({task:'instruction',instruction:'Подготовь юридическую инструкцию по взысканию'});
     const turn=(await call(root+'/turns')).find(t=>t.id===instruction.id);assert.equal(turn.context.task,'instruction');assert.equal(turn.result.package.folder,'/Юридические инструкции');
     assert.equal((await call(prefix+'/files')).artifacts.length,2+n);
     const op=await call(root+'/turns/'+instruction.id+'/proposal','POST',{},jwt('owner'),201);

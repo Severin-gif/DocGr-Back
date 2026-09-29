@@ -4,7 +4,7 @@ import {strict as assert} from 'node:assert';
 import {DiscussionService} from './modules/docgrid/discussion.service';
 test('LLM configuration distinguishes missing setup, authentication, disabled provider and no models without leaking secrets',async()=>{
  const env={url:process.env.DOCGRID_ORCHESTRA_URL,token:process.env.DOCGRID_SERVICE_TOKEN},original=global.fetch;
- const service=new DiscussionService({} as any,{} as any) as any;
+ const service=new DiscussionService({} as any,{} as any,{} as any,{} as any) as any;
  try{
   delete process.env.DOCGRID_ORCHESTRA_URL;assert.equal((await service.providerConfig()).connectionStatus,'backend_not_configured');
   process.env.DOCGRID_ORCHESTRA_URL='https://fixture.invalid';process.env.DOCGRID_SERVICE_TOKEN='s'.repeat(40);
