@@ -1,3 +1,5 @@
+import { AiTimeBudgetService } from './ai-time-budget.service';
+import { ProjectContextService } from './project-context.service';
 import { isOcrMaterial } from './docgrid-ocr';
 import { ForbiddenException, BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -55,7 +57,7 @@ type ReviewRow = {
 @Injectable()
 export class DocGridService {
   private readonly uploadLogger = new Logger('DocGridUpload');
-  constructor(private readonly prisma: PrismaService, @Optional() private readonly materialStorage?: DocGridMaterialStorageService) {}
+  constructor(private readonly prisma: PrismaService, @Optional() private readonly materialStorage?: DocGridMaterialStorageService, @Optional() private readonly timeBudget?:AiTimeBudgetService, @Optional() private readonly projectMemory?:ProjectContextService) {}
 
   private async requireRepo(db: Db, ownerId: string, projectId: string, action: 'read' | 'write' | 'merge' | 'owner' = 'read'): Promise<RepoRow> {
     const rows = await db.$queryRaw<RepoRow[]>`
@@ -827,6 +829,8 @@ export class DocGridService {
     const token = process.env.DOCGRID_SERVICE_TOKEN ?? '';
     if (token.length < 32) throw new ServiceUnavailableException('DOCGRID_SERVICE_TOKEN is not configured');
     const started = Date.now();
+    const projectContext=await this.projectMemory?.context(projectId,context.evidence.map(e=>e.id));
+    const timeCall=await this.timeBudget?.reserve(projectId);
     let response: Response;
     try {
       response = await fetch(this.docGridOrchestraBase() + '/internal/docgrid/review', {
@@ -835,7 +839,7 @@ export class DocGridService {
         signal: AbortSignal.timeout(85_000),
         headers: { 'Content-Type': 'application/json', 'x-docgrid-service-token': token },
         body: JSON.stringify({
-          mode: 'review',
+          mode: 'review',projectContext,
           repository: { id: context.repository.id, name: context.repository.name },
           sourceBranch: { id: context.source.id, name: context.source.name },
           targetBranch: { id: context.target.id, name: context.target.name },
@@ -848,7 +852,7 @@ export class DocGridService {
       });
     } catch {
       throw new BadGatewayException('AI-Orchestra недоступен');
-    }
+    }finally{if(timeCall)await this.timeBudget!.finish(timeCall);}
     const body = await response.text();
     if (body.length > 1_000_000) throw new BadGatewayException('AI-Orchestra response is too large');
     let payload: any;

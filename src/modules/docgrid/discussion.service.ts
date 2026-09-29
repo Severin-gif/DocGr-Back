@@ -1,3 +1,5 @@
+import { AiTimeBudgetService } from './ai-time-budget.service';
+import { ProjectContextService } from './project-context.service';
 import { LEGAL_INSTRUCTION_FOLDER, instructionDocument, resolveDiscussionTask, validateLegalInstructionResponse } from './legal-instruction.protocol';
 import { BadGatewayException, BadRequestException, ConflictException, HttpException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -8,7 +10,7 @@ import { ChatSource, DiscussionMode, DiscussionResult, PAYMENT_FIELDS, validateD
 
 @Injectable()
 export class DiscussionService {
-  constructor(private readonly db:PrismaService,private readonly agents:AstraService){}
+  constructor(private readonly db:PrismaService,private readonly agents:AstraService,private readonly memory:ProjectContextService,private readonly timeBudget:AiTimeBudgetService){}
   private dailyLimit() {
     const n=Number(process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT ?? 30);
     return Number.isInteger(n)&&n>=1&&n<=500?n:30;
@@ -33,8 +35,10 @@ export class DiscussionService {
     const access=await this.agents.builtinAccess(user,project),provider=await this.providerConfig();
     const rows=await this.db.$queryRaw<any[]>`SELECT requests FROM docgrid.dg_ai_daily_usage WHERE user_id=${user} AND day=(now() AT TIME ZONE 'UTC')::date`;
     const limit=this.dailyLimit(),used=rows[0]?.requests||0;
-    return {...access,...provider,connectionMessage:access.isOwner?provider.connectionMessage:undefined,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
+    return {...access,...provider,time:await this.timeBudget.status(project),connectionMessage:access.isOwner?provider.connectionMessage:undefined,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
   }
+  async projectContext(user:string,project:string){const a=await this.agents.builtinAccess(user,project);return {...await this.memory.status(project),canPrepare:a.canPrepare};}
+  async refreshContext(user:string,project:string){const a=await this.agents.builtinAccess(user,project);if(!a.canPrepare)throw new BadRequestException('Недостаточно прав');return this.memory.retry(project);}
   async settings(user:string,project:string,raw:unknown) {
     const r=objectInput(raw);assertKeys(r,['enabled']);if(typeof r.enabled!=='boolean')throw new BadRequestException('Укажите состояние встроенной LLM');
     return this.agents.setBuiltinEnabled(user,project,r.enabled);
@@ -66,7 +70,7 @@ export class DiscussionService {
     const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query','model']);
     const requestKey=stringInput(r,'requestKey',120),instruction=stringInput(r,'instruction',8000),mode=stringInput(r,'mode',20) as DiscussionMode;
     if(!['advisor','helper','assistant'].includes(mode))throw new BadRequestException('Неизвестный режим');
-    const task=resolveDiscussionTask(stringInput(r,'task',20),instruction,mode);if(!['chat','sort','package','instruction'].includes(task)||(mode==='advisor'&&['package','instruction'].includes(task)))throw new BadRequestException('Задача недоступна в этом режиме');
+    const task=stringInput(r,'task',20,false)||'chat';if(!['chat','sort','package','instruction'].includes(task)||(mode==='advisor'&&['package','instruction'].includes(task)))throw new BadRequestException('Задача недоступна в этом режиме');
     const model=stringInput(r,'model',100,false)||'default';
     const offset=integerInput(r,'offset',0,5000,0),query=stringInput(r,'query',200,false);
     const folder=r.folder===undefined?null:stringInput(r,'folder',500);
@@ -91,6 +95,7 @@ export class DiscussionService {
       return null;
     },{timeout:15000});
     if(prior)return {id:prior.id,status:prior.status};
+    let timeCall:Awaited<ReturnType<AiTimeBudgetService['reserve']>>|undefined;
     const call=async(tool:string,input:Record<string,unknown>)=>(await this.agents.executeForUser(user,thread.grant_id,tool,{projectId:project,runId:turnId,traceId:turnId,requestKey:randomUUID(),input})).output as any;
     try{
       let snapshot=await call('docgrid_get_snapshot',{capture:true,limit:200});
@@ -131,26 +136,30 @@ export class DiscussionService {
         for(const s of batch){const read=await call('docgrid_read_source',{sourceRef:s.sourceRef,maxChars:5000});sources.push({id:s.sourceId,title:s.title,path:s.path,text:read.text,status:read.truncated?'PARTIAL':read.status});refs.push(s.sourceRef);coverage.push({sourceId:s.sourceId,title:s.title,path:s.path,status:read.status,truncated:read.truncated,characters:read.text.length,sourceRef:s.sourceRef});}
         if(retrieval)retrieval.fallback='first-source-sample-no-search-hits';
       }
-      const context={task,snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
+      const projectContext=await this.memory.context(project,manifest.map(s=>s.sourceId));
+      const context={projectContext,task,snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
       await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET context=${JSON.stringify(context)}::jsonb WHERE id=${turnId}::uuid`;
-      const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' ORDER BY created_at DESC LIMIT 4`;
+      const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' ORDER BY created_at DESC LIMIT 200`;
       const token=process.env.DOCGRID_SERVICE_TOKEN||'',base=process.env.DOCGRID_ORCHESTRA_URL||'';
       if(token.length<32||!base)throw new ServiceUnavailableException('Настройте DOCGRID_ORCHESTRA_URL и DOCGRID_SERVICE_TOKEN в Doc-Back');
       const url=new URL(base);if(!['https:','http:'].includes(url.protocol)||url.username||url.password)throw new ServiceUnavailableException('Некорректный адрес AI-Orchestra');
-      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/discussion',{method:'POST',redirect:'error',signal:AbortSignal.timeout(85000),headers:{'Content-Type':'application/json','x-docgrid-service-token':token},body:JSON.stringify({model,mode,task,instruction,sources,history:history.reverse().flatMap(h=>[{role:'user',text:h.instruction},{role:'assistant',text:h.result.answer}])})});
+      timeCall=await this.timeBudget.reserve(project);
+      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/discussion',{method:'POST',redirect:'error',signal:AbortSignal.timeout(85000),headers:{'Content-Type':'application/json','x-docgrid-service-token':token},body:JSON.stringify({model,mode,task,instruction,sources,projectContext,history:[...(history.length>4?[{role:'user',text:'Ранее в этом диалоге (сокращённо; прежние ответы не являются доказательствами): '+history.slice(4).reverse().map(h=>h.instruction.slice(0,300)+' / '+h.result.answer.slice(0,300)).join('\n').slice(-11500)}]:[]),...history.slice(0,4).reverse().flatMap(h=>[{role:'user',text:h.instruction},{role:'assistant',text:h.result.answer}])]} )});
       if(!response.ok||!response.body){await response.body?.cancel();throw new BadGatewayException(`ИИ недоступен (${response.status}). Проверьте настройки AI-Orchestra.`);}
       const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;
       try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>1000000){await reader.cancel();throw new Error('Response limit');}chunks.push(value);}}finally{reader.releaseLock();}
       let payload:any,result:DiscussionResult;
       try{payload=JSON.parse(Buffer.concat(chunks).toString('utf8'));result=(task==='instruction'?validateLegalInstructionResponse:validateDiscussionResult)(payload.result,sources,mode);}catch{throw new BadGatewayException('Модель вернула неподтверждённые данные или неверный формат. Предложение не создано.');}
+      if(task==='chat'){result.package=null;result.classifications=[];}
       // Fresh authorization after model latency; revoked grants cannot commit a new result.
       await call('docgrid_get_capabilities',{});
       const provider={model:typeof payload.model==='string'?payload.model.slice(0,200):null,requestId:payload.requestId,usage:payload.usage};
       await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET status='completed',result=${JSON.stringify(result)}::jsonb,provider=${JSON.stringify(provider)}::jsonb,updated_at=now() WHERE id=${turnId}::uuid AND status='running'`;
+      if(task!=='chat'&&mode!=='advisor'&&(result.package||result.classifications.some(c=>c.confidence==='high'))){try{await this.propose(user,project,id,turnId);}catch(e){result.warnings.push('Предложение не создано: '+(e instanceof Error?e.message:'обновите контекст и повторите'));await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET result=${JSON.stringify(result)}::jsonb WHERE id=${turnId}::uuid`;}}
       return {id:turnId,status:'completed'};
     }catch(error){const message=error instanceof ServiceUnavailableException||error instanceof BadGatewayException||error instanceof BadRequestException?error.message:'Не удалось обработать запрос. Проверьте права LLM и доступность модели.';
       await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET status='failed',error=${message},updated_at=now() WHERE id=${turnId}::uuid`;throw error;
-    }
+    }finally{if(timeCall)await this.timeBudget.finish(timeCall);}
   }
   async propose(user:string,project:string,id:string,turnId:string){
     const thread=await this.thread(user,project,id);

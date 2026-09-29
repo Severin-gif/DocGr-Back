@@ -44,6 +44,7 @@ async function run(args) {
   await call(prefix+'/agents/grants','GET',undefined,grant.token,401);
   const catalog=await call('/api/docgrid/agents/catalog?projectId='+p.id,'GET',undefined,grant.token);assert.ok(catalog.tools.length);
   const mcp=await call('/api/docgrid/mcp/'+p.id,'POST',{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},grant.token);assert.ok(mcp.result?.tools?.length,JSON.stringify(mcp));
+  await require('./context-acceptance.cjs')({call,jwt,db,app});
   await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});
   await require('./ocr-search-acceptance.cjs')({call,prefix,p,material,jwt,db,app});
   const tables=await db.$queryRaw`SELECT table_schema,table_name FROM information_schema.tables WHERE table_name IN ('workspace_projects','User','_prisma_migrations') AND table_schema IN ('public','docgrid')`;

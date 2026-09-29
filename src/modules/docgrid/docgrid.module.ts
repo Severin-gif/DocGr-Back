@@ -1,3 +1,5 @@
+import { AiTimeBudgetService } from './ai-time-budget.service';
+import { ProjectContextService } from './project-context.service';
 import { DocGridOcrService } from './docgrid-ocr.service';
 import { DiscussionService } from './discussion.service';
 import { DiscussionController } from './discussion.controller';
@@ -22,7 +24,7 @@ import { AstraUploadService } from './astra/astra-upload.service';
 @Module({
   imports: [],
   controllers: [DiscussionController, DocGridController, DocGridAdminController, AstraAgentController, AstraHumanController],
-  providers: [DocGridOcrService,DiscussionService,DocumentFileService, { provide: S3Service, inject: [ConfigService], useFactory: (config: ConfigService) => new S3Service(new ConfigService(Object.fromEntries(['ENDPOINT', 'BUCKET', 'REGION', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'FORCE_PATH_STYLE'].map(key => [`S3_${key}`, config.get(`DOCGRID_S3_${key}`)])))) }, AgentOAuthCodeStore, DocGridMaterialStorageService, DocGridBackupService, DocGridService, DocGridAdminGuard, DocGridIdentityGuard, AstraAgentGuard, AstraService, AstraSourcesService, AstraWorkflowService, AstraUploadService],
+  providers: [AiTimeBudgetService,ProjectContextService,DocGridOcrService,DiscussionService,DocumentFileService, { provide: S3Service, inject: [ConfigService], useFactory: (config: ConfigService) => new S3Service(new ConfigService(Object.fromEntries(['ENDPOINT', 'BUCKET', 'REGION', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'FORCE_PATH_STYLE'].map(key => [`S3_${key}`, config.get(`DOCGRID_S3_${key}`)])))) }, AgentOAuthCodeStore, DocGridMaterialStorageService, DocGridBackupService, DocGridService, DocGridAdminGuard, DocGridIdentityGuard, AstraAgentGuard, AstraService, AstraSourcesService, AstraWorkflowService, AstraUploadService],
   exports: [DocGridService, AstraService, AgentOAuthCodeStore],
 })
 export class DocGridModule {}
