@@ -1,9 +1,10 @@
+import type { LegalInstruction } from './legal-instruction.protocol';
 /** Shared with DocGr-Back; keep contract tests in both repositories. */
 export type DiscussionMode = 'advisor' | 'helper' | 'assistant';
 export type ChatSource = { id: string; title: string; path: string; text: string; status: string };
 export type Citation = { sourceId: string; quote: string };
 export type DiscussionResult = {
-  answer: string; warnings: string[];
+  answer: string; warnings: string[]; legalInstruction?: LegalInstruction | null;
   classifications: Array<{ sourceId: string; category: string; destination: string; reason: string; confidence: 'high' | 'medium' | 'low'; evidence: Citation[] }>;
   package: null | { folder: string; documents: Array<{ title: string; text: string }>; sourceIds: string[]; missingData: string[];
     payment: null | Array<{ field: string; value: string | null; evidence: Citation[] }> };
@@ -30,10 +31,11 @@ export function discussionPath(v: unknown): string {
 export function validateDiscussionInput(raw: unknown) {
   const r = object(raw);
   if (!['advisor','helper','assistant'].includes(r.mode)) throw Error('mode');
+  if(r.task==='instruction'&&r.mode==='advisor')throw Error('Advisor cannot prepare instructions');
   const sources: ChatSource[] = list(r.sources, 20).map(x => { const s = object(x); return { id: text(s.id, 100), title: text(s.title, 240), path: discussionPath(s.path), text: typeof s.text === 'string' && s.text.length <= 12000 ? s.text : (() => { throw Error('source text'); })(), status: text(s.status, 30) }; });
   if (new Set(sources.map(s => s.id)).size !== sources.length || sources.reduce((n, s) => n + s.text.length, 0) > 100000) throw Error('source limits');
   const history = list(r.history ?? [], 8).map(v => { const h=object(v); if (!['user','assistant'].includes(h.role)) throw Error('role'); return { role: h.role as string, text: text(h.text, 12000) }; });
-  return { mode: r.mode as DiscussionMode, instruction: text(r.instruction, 8000), sources, history, task: ['sort','package','chat'].includes(r.task) ? r.task as string : 'chat' };
+  return { mode: r.mode as DiscussionMode, instruction: text(r.instruction, 8000), sources, history, task: ['sort','package','chat','instruction'].includes(r.task) ? r.task as string : 'chat' };
 }
 export function validateDiscussionResult(raw: unknown, sources: ChatSource[], mode: DiscussionMode): DiscussionResult {
   const r = object(raw), known = new Map(sources.map(s => [s.id, s]));
@@ -68,3 +70,4 @@ export const DISCUSSION_SYSTEM = `Ты помощник универсально
 Для sort дай по каждому переданному источнику мини-заключение: к какому вопросу/контрагенту относится, куда переместить, зачем, уверенность и точные цитаты. Если содержания нет, уверенность low и явное указание на гипотезу по имени; никогда high. destination — абсолютная папка, без имени файла. Не перемещай по одному лишь имени или низкой уверенности.
 Для package по прямому запросу подготовь комплект: папка вопроса/контрагента, иск или иной основной черновик, опись приложений, список недостающего. sourceIds — только подтверждающие приложения. Пробелы обозначай [ТРЕБУЕТСЯ ...]. Не сочиняй факты ради законченного текста. Для госпошлины payment содержит только дословно подтверждённые источниками значения; неизвестные null. Реквизиты и ставку нельзя признать актуальными без внешней проверки, здесь её нет. Не включай реквизиты или расчёт госпошлины в свободный текст документов: только в payment и missingData. Не формируй банковский файл и не инициируй платёж. Все результаты — черновики на проверку.
 Для обычного chat package=null, classifications=[] если сортировка не запрошена. Цитаты должны точно совпадать с переданным текстом. Не добавляй документы/идентификаторы вне источников.`;
+

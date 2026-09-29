@@ -11,6 +11,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   const result={answer:'Проверено по тексту',warnings:[],classifications:[],package:null};
   if(task==='sort')result.classifications=[{sourceId:s.id,category:'Доказательства',destination:'/Разобрано',reason:'Подтверждено текстом',confidence:'high',evidence:[{sourceId:s.id,quote:'Original evidence'}]}];
   if(task==='package')result.package={folder:'/Дебиторка/ООО Ромашка',documents:[{title:'Иск — черновик',text:'Обстоятельства: Original evidence. [ТРЕБУЕТСЯ: сумма долга, договор и надлежащий суд]'}],sourceIds:[s.id],missingData:['Подтвердить стороны и сумму долга'],payment:[{field:'Получатель',value:null,evidence:[]}]};
+  if(task==='instruction'){assert.equal(input.task,'instruction');result.legalInstruction={title:'Порядок взыскания',goal:'Подготовить требование',facts:[{text:'Доказательство в материалах',evidence:[{sourceId:s.id,quote:'Original evidence'}]}],steps:[{action:'Проверить доказательство',purpose:'Определить основания требования',documents:['Исходный документ'],deadline:null,evidence:[]}],legalBasis:[],missingData:['Срок и правовое основание'],risks:['Неполные материалы'],checklist:['Доказательства сопоставлены']};}
   if(task==='bad')result.classifications=[{sourceId:s.id,category:'X',destination:'/X',reason:'X',confidence:'high',evidence:[{sourceId:s.id,quote:'invented quote'}]}];
   res.setHeader('content-type','application/json');res.end(JSON.stringify({result,model:'acceptance-stub',usage:{total_tokens:5}}));
  });
@@ -18,7 +19,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
  process.env.DOCGRID_ORCHESTRA_URL='http://127.0.0.1:'+server.address().port;
  try{
   const catalog=await call(prefix+'/agents/catalog');
-  const grant=await call(prefix+'/agents/grants','POST',{requestKey:randomUUID(),agentRef:'built-in-test',actions:catalog.tools.map(t=>t.name),expiresAt:new Date(Date.now()+3600000).toISOString(),maxOperations:150},jwt('owner'),201);
+  const grant=await call(prefix+'/agents/grants','POST',{requestKey:randomUUID(),agentRef:'built-in-test',actions:catalog.tools.map(t=>t.name),expiresAt:new Date(Date.now()+3600000).toISOString(),maxOperations:300},jwt('owner'),201);
   const thread=await call(prefix+'/discussions','POST',{title:'Проверка сортировки',grantId:grant.grant.id},jwt('owner'),201);
   const root=prefix+'/discussions/'+thread.id;
   await call(root+'/turns','GET',undefined,jwt('stranger'),404);
@@ -47,6 +48,25 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   const tree=await call(prefix+'/files');assert.equal(tree.artifacts.length,2);assert.equal(tree.materials.find(m=>m.id===material.id).path,'/Дебиторка/ООО Ромашка/Приложения');
   assert.ok(tree.artifacts.every(a=>a.path==='/Дебиторка/ООО Ромашка'));
   const id=tree.artifacts[0].id;const draft=await call(prefix+'/agents/artifacts/'+id+'/versions/1');assert.ok(draft.plainText.includes('Черновик'));
+  // Legal instruction: preview does not create a file; two reviewed saves reuse the folder without moving originals.
+  task='instruction';
+  await send({task:'instruction',mode:'advisor'},400);
+  const originalPath=tree.materials.find(m=>m.id===material.id).path;
+  for(let n=0;n<2;n++){
+    const instruction=await send({task:n?'instruction':'chat',instruction:'Подготовь юридическую инструкцию по взысканию'});
+    const turn=(await call(root+'/turns')).find(t=>t.id===instruction.id);assert.equal(turn.context.task,'instruction');assert.equal(turn.result.package.folder,'/Юридические инструкции');
+    assert.equal((await call(prefix+'/files')).artifacts.length,2+n);
+    const op=await call(root+'/turns/'+instruction.id+'/proposal','POST',{},jwt('owner'),201);
+    const again=await call(root+'/turns/'+instruction.id+'/proposal','POST',{},jwt('owner'),201);assert.equal(again.id,op.id);
+    const accepted=await call(prefix+'/agents/operations/'+op.id+'/approve','POST',{requestKey:randomUUID(),approvalDigest:op.approvalDigest},jwt('owner'),201);
+    const output=await call(prefix+'/agents/artifacts/'+accepted.result.artifacts[0].artifactId+'/versions/1');assert.match(output.plainText,/Порядок действий/);assert.match(output.plainText,/Контроль готовности/);
+    const current=await call(prefix+'/files');assert.equal(current.artifacts.filter(a=>a.path==='/Юридические инструкции').length,n+1);assert.equal(current.materials.find(m=>m.id===material.id).path,originalPath);assert.ok(!current.folders.some(f=>f.path==='/Юридические инструкции/Приложения'));
+  }
+  const changed=await send({task:'instruction'}),op=await call(root+'/turns/'+changed.id+'/proposal','POST',{},jwt('owner'),201);
+  await call(prefix+'/folders','POST',{path:'/AnotherChange'},jwt('owner'),201);
+  await call(prefix+'/agents/operations/'+op.id+'/approve','POST',{requestKey:randomUUID(),approvalDigest:op.approvalDigest},jwt('owner'),409);
+  assert.equal((await call(prefix+'/files')).artifacts.length,4);
+  console.log('PASS legal instructions: explicit/chat request, preview, reviewed save, repeated folder, idempotent proposal, original preservation and stale rejection');
   task='bad';await send({},502);assert.equal((await call(root+'/turns')).at(-1).status,'failed');
   await call(prefix+'/agents/grants/'+grant.grant.id+'/revoke','POST',{requestKey:randomUUID()},jwt('owner'),201);
   await send({},403);
@@ -63,6 +83,8 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   // Viewer cannot turn a generated package into a writable proposal.
   task='package';const readonlyPack=await bsend({mode:'helper',task:'package'});
   await call(broot+'/turns/'+readonlyPack.id+'/proposal','POST',{},jwt('reader'),404);
+  task='instruction';const readonlyInstruction=await bsend({mode:'helper',task:'instruction'});
+  await call(broot+'/turns/'+readonlyInstruction.id+'/proposal','POST',{},jwt('reader'),404);
   await call(prefix+'/discussions/settings','PUT',{enabled:false},jwt('reader'),404);
   await call(prefix+'/discussions/settings','PUT',{enabled:false},jwt('owner'));
   await bsend({},403);
@@ -88,4 +110,3 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   console.log('PASS discussions: ACL, idempotent sends, evidence quotes, reviewed moves, advisor boundary, stale package rollback, draft package + attachments + payment gaps, grant revocation');
  }finally{await new Promise(resolve=>server.close(resolve));delete process.env.DOCGRID_ORCHESTRA_URL;}
 };
-
