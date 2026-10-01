@@ -120,7 +120,7 @@ export class DocumentFileService {
     return this.storage.getObject(key);
   }
 
-  private async renderDocx(content: StructuredLegalDocument): Promise<Buffer> {
+  async renderDocx(content: StructuredLegalDocument): Promise<Buffer> {
     const children: Array<Paragraph | Table> = [
       new Paragraph({
         alignment: AlignmentType.CENTER,
@@ -219,7 +219,7 @@ export class DocumentFileService {
     });
   }
 
-  private async convertDocxToPdf(docx: Buffer): Promise<Buffer> {
+  async convertDocxToPdf(docx: Buffer): Promise<Buffer> {
     const directory = await mkdtemp(join(tmpdir(), 'codex-document-'));
     const input = join(directory, `${randomUUID()}.docx`);
     const output = input.replace(/\.docx$/i, '.pdf');
