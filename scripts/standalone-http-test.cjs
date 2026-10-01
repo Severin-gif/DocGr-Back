@@ -45,6 +45,7 @@ async function run(args) {
   const catalog=await call('/api/docgrid/agents/catalog?projectId='+p.id,'GET',undefined,grant.token);assert.ok(catalog.tools.length);
   const mcp=await call('/api/docgrid/mcp/'+p.id,'POST',{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},grant.token);assert.ok(mcp.result?.tools?.length,JSON.stringify(mcp));
   await require('./file-management-acceptance.cjs')({call,jwt,base});
+  await require('./court-package-acceptance.cjs')({call,jwt,base});
   await require('./context-acceptance.cjs')({call,jwt,db,app});
   await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});
   await require('./ocr-search-acceptance.cjs')({call,prefix,p,material,jwt,db,app});
@@ -53,4 +54,3 @@ async function run(args) {
   clearTimeout(timeout);passed=true;console.log('PASS standalone HTTP + real Prisma: SSO, forged headers rejected, project isolation, nested upload/download, draft, Home, agent grants, MCP, isolated schema and repeatable migrations; no Legal Core');
  }finally{await app?.close();await socket?.stop();await embedded?.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
-

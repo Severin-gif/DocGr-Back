@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y poppler-utils util-linux python3 python3-xlrd antiword python3-pil fonts-dejavu-core tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+      - run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils util-linux python3 python3-xlrd antiword python3-pil fonts-dejavu-core tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
       - run: npm ci --no-audit --no-fund
       - run: npm run check
       - run: npm test
@@ -42,4 +42,3 @@ jobs:
           test "$(docker exec dg-ci id -u)" != 0
       - if: always()
         run: docker logs dg-ci 2>&1 || true
-
