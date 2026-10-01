@@ -147,6 +147,14 @@ export class DocGridService {
     });
   }
 
+  async deleteRepository(ownerId:string,projectId:string) {
+    return this.prisma.$transaction(async tx=>{
+      await this.requireRepo(tx,ownerId,projectId,'owner');
+      await tx.workspaceProject.delete({where:{id:projectId}});
+      return {deleted:true};
+    });
+  }
+
   async updateRepository(ownerId: string, projectId: string, dto: UpdateDocGridRepositoryDto) {
     const name = dto.name.trim();
     if (!name) throw new BadRequestException('Название проекта обязательно');
@@ -932,6 +940,22 @@ export class DocGridService {
     });
   }
 
+  async compareMaterial(user:string,project:string,id:string,file:{originalname:string;mimetype:string;buffer:Buffer}) {
+    await this.requireRepo(this.prisma,user,project,'write');
+    if(!file?.buffer?.length||file.buffer.length>DOCGRID_PROJECT_MAX_BYTES)throw new BadRequestException('Недопустимый размер файла');
+    const original=await this.material(user,project,id);
+    const hash=createHash('sha256').update(file.buffer).digest('hex');
+    const identical=hash===original.sha256;
+    const current=await this.materialText(user,project,id);
+    const next=identical?current:await extractMaterialText(original.title,file.buffer);
+    // This records a deterministic byte/text comparison, not a model approval.
+    await this.prisma.$transaction(async tx=>{
+      await this.requireRepo(tx,user,project,'write');
+      await this.event(tx,project,user,'material.compared','material',id,{originalSha256:original.sha256,candidateSha256:hash,identical,currentStatus:current.status,candidateStatus:next.status});
+    });
+    return {identical,sha256:hash,current:{text:current.text,status:current.status},candidate:{text:next.text,status:next.status}};
+  }
+
   async uploadMaterial(ownerId:string,projectId:string,file:{originalname:string;mimetype:string;buffer:Buffer},path?:string,requestId?:string) {
     if(!file?.buffer?.length)throw new BadRequestException('Файл пуст');
     if(file.buffer.length>DOCGRID_PROJECT_MAX_BYTES)throw new BadRequestException('Файл превышает общий лимит проекта 500 МБ');
@@ -1157,6 +1181,3 @@ export class DocGridService {
     `;
   }
 }
-
-
-

@@ -37,11 +37,13 @@ export class DiscussionService {
     const limit=this.dailyLimit(),used=rows[0]?.requests||0;
     return {...access,...provider,time:await this.timeBudget.status(project),connectionMessage:access.isOwner?provider.connectionMessage:undefined,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
   }
-  async projectContext(user:string,project:string){const a=await this.agents.builtinAccess(user,project);return {...await this.memory.status(project),canPrepare:a.canPrepare};}
-  async refreshContext(user:string,project:string){const a=await this.agents.builtinAccess(user,project);if(!a.canPrepare)throw new BadRequestException('Недостаточно прав');return this.memory.retry(project);}
+  async projectContext(user:string,project:string){const a=await this.agents.builtinAccess(user,project);return {...await this.memory.status(project),canPrepare:a.canPrepare,isOwner:a.isOwner,...(!a.enabled?{state:'blocked',reason:'disabled'}:{})};}
+  async refreshContext(user:string,project:string){const a=await this.agents.builtinAccess(user,project);if(!a.canPrepare)throw new BadRequestException('Недостаточно прав');if(!a.enabled)throw new BadRequestException('Включите встроенную LLM в настройках проекта');await this.memory.retry(project);return this.projectContext(user,project);}
   async settings(user:string,project:string,raw:unknown) {
     const r=objectInput(raw);assertKeys(r,['enabled']);if(typeof r.enabled!=='boolean')throw new BadRequestException('Укажите состояние встроенной LLM');
-    return this.agents.setBuiltinEnabled(user,project,r.enabled);
+    const result=await this.agents.setBuiltinEnabled(user,project,r.enabled);
+    if(r.enabled)await this.memory.retry(project);
+    return result;
   }
   private async thread(user:string,project:string,id:string){
     await this.agents.getCatalog(user,project);
