@@ -33,8 +33,8 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
       const css=node.attrs.find(a=>a.name==='style')?.value||'';
       for(const rule of css.split(';')) {
         const [key,...parts]=rule.split(':');const v=parts.join(':').trim();
-        if(key.trim()==='font-weight'&&(/bold|[6-9]00/.test(v)))style.bold=true;
-        if(key.trim()==='font-style'&&v==='italic')style.italics=true;
+        if(key.trim()==='font-weight')style.bold=/^(bold|[6-9]00)$/.test(v);
+        if(key.trim()==='font-style')style.italics=v==='italic';
         if(key.trim()==='text-decoration'&&v.includes('underline'))style.underline={type:UnderlineType.SINGLE};
         const hex=color(v);
         if(key.trim()==='color'&&hex)style.color=hex;
