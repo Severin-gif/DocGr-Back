@@ -5,7 +5,7 @@ import type { Response } from 'express';
 import { DocGridRelocateMaterialDto,DocGridFolderDto,DocGridTrashDto,DocGridMemberDto,DocGridRestoreDto,DocGridCommentDto } from './docgrid.dto';
 import {
   Headers, UploadedFile, UseInterceptors, StreamableFile, Res, Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe,
-  Post, Put, Query, UseGuards,
+  Post, Put, Query, UseGuards, Delete,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -48,6 +48,9 @@ export class DocGridController {
   // so malformed multipart requests cannot grow without bound in memory.
   @UseInterceptors(FileInterceptor('file',{limits:{fileSize:DOCGRID_PROJECT_MAX_BYTES,files:1,fields:1}}))
   upload(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@UploadedFile() file:{originalname:string;mimetype:string;buffer:Buffer},@Body('path') path?:string,@Headers('x-request-id') requestId?:string) {return this.docgrid.uploadMaterial(user,project,file,path,requestId);}
+  @Post('repositories/:projectId/materials/:id/compare')
+  @UseInterceptors(FileInterceptor('file',{limits:{fileSize:DOCGRID_PROJECT_MAX_BYTES,files:1,fields:0}}))
+  compareMaterial(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string,@UploadedFile() file:{originalname:string;mimetype:string;buffer:Buffer}){return this.docgrid.compareMaterial(user,project,id,file);}
   @Post('repositories/:projectId/materials/:id/relocate')
   relocate(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string,@Body() dto:DocGridRelocateMaterialDto) {return this.docgrid.relocateMaterial(user,project,id,dto);}
   @Get('repositories/:projectId/materials/:id/text')
@@ -77,6 +80,9 @@ export class DocGridController {
   comment(@CurrentUser('id') user:string,@Param('branchId',ParseUUIDPipe) branch:string,@Param('id',ParseUUIDPipe) id:string,@Body() dto:DocGridCommentDto) {return this.docgrid.addComment(user,branch,id,dto);}
   @Get('repositories/:projectId/judgments/:branchId')
   judgments(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('branchId',ParseUUIDPipe) branch:string) {return this.docgrid.judgments(user,project,branch);}
+
+  @Delete('repositories/:projectId')
+  deleteRepository(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string){return this.docgrid.deleteRepository(user,project);}
 
   @Get('repositories')
   repositories(@CurrentUser('id') userId: string) {
@@ -296,6 +302,3 @@ export class DocGridAdminController {
     return this.docgrid.adminEvents(Number.isFinite(limit) ? limit : 100);
   }
 }
-
-
-
