@@ -1,0 +1,20 @@
+const assert=require('node:assert/strict');
+const {renderWorkspaceDocx}=require('../dist/modules/docgrid/workspace-document-export');
+module.exports=async ({call,prefix,jwt,base})=>{
+ const bytes=await renderWorkspaceDocx('<!-- docgrid-richtext-v1 --><p><b>Договор</b></p><table><tr><td><p>100 рублей</p></td></tr></table>');
+ const form=new FormData();form.append('path','/');form.append('file',new Blob([bytes]),'Договор.docx');
+ const uploaded=await fetch(base+prefix+'/materials',{method:'POST',headers:{authorization:'Bearer '+jwt('owner')},body:form});const material=await uploaded.json();assert.equal(uploaded.status,201,JSON.stringify(material));
+ const endpoint=prefix+'/materials/'+material.id+'/office-view';
+ await call(endpoint,'GET',undefined,null,401);await call(endpoint,'GET',undefined,jwt('stranger'),404);
+ const view=await call(endpoint);assert.equal(view.kind,'docx');assert.match(view.html,/<table>/);assert.match(view.html,/font-weight:bold/);
+ const original=await fetch(base+prefix+'/materials/'+material.id+'/download',{headers:{authorization:'Bearer '+jwt('owner')}});assert.deepEqual(Buffer.from(await original.arrayBuffer()),bytes);
+ const doc=await call(prefix+'/artifacts','POST',{title:'Договор — редакция',content:'<!-- docgrid-richtext-v1 -->'+view.html},jwt('owner'),201);
+ const overview=await call(prefix+'/overview');const main=overview.branches.find(b=>b.kind==='MAIN');
+ const work=await call(prefix+'/branches','POST',{name:'Правки DOCX',fromBranchId:main.id,kind:'WORK'},jwt('owner'),201);
+ const branchDocs=await call('/api/docgrid/branches/'+work.id+'/documents');const state=branchDocs.find(d=>d.documentId===doc.id);
+ await call('/api/docgrid/branches/'+work.id+'/documents/'+doc.id,'PUT',{revision:state.revision,content:state.content.replace('100 рублей','200 рублей'),message:'Изменена сумма'});
+ const pr=await call('/api/docgrid/reviews','POST',{projectId:main.projectId,sourceBranchId:work.id,targetBranchId:main.id,title:'Правки DOCX'},jwt('owner'),201);
+ await call('/api/docgrid/reviews/'+pr.id+'/merge','POST',{},jwt('owner'),200);
+ const merged=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===doc.id);assert.match(merged.content,/200 рублей/);assert.match(merged.content,/<table>/);
+ console.log('PASS office HTTP ACL, preserved original, rich DOCX branch edit, internal PR and merge');
+};

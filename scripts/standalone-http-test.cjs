@@ -38,6 +38,9 @@ async function run(args) {
   const upload=await fetch(base+prefix+'/materials',{method:'POST',headers:{authorization:'Bearer '+jwt('owner')},body:form});const material=await upload.json();assert.equal(upload.status,201,JSON.stringify(material));
   const download=await fetch(base+prefix+'/materials/'+material.id+'/download',{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(download.status,200);assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
   await call(prefix+'/materials/'+material.id+'/download','GET',undefined,jwt('stranger'),404);
+  await require('./office-http-acceptance.cjs')({call,prefix,jwt,base});
+  await require('./document-quality-http-acceptance.cjs')({call,jwt});
+  if(process.argv.includes('--office-only')){clearTimeout(timeout);passed=true;return;}
   const artifact=await call(prefix+'/artifacts','POST',{title:'Draft',content:'Text'},jwt('owner'),201);assert.ok(artifact.id);
   const home=await call('/api/docgrid/home');assert.ok(JSON.stringify(home).includes('Standalone test'));
   const grant=await call(prefix+'/agents/grants','POST',{requestKey:'new-grant',agentRef:'any-llm',actions:['docgrid_get_capabilities'],expiresAt:new Date(Date.now()+3600000).toISOString(),maxOperations:20},jwt('owner'),201);assert.ok(grant.token.startsWith('dga_'));
@@ -54,3 +57,4 @@ async function run(args) {
   clearTimeout(timeout);passed=true;console.log('PASS standalone HTTP + real Prisma: SSO, forged headers rejected, project isolation, nested upload/download, draft, Home, agent grants, MCP, isolated schema and repeatable migrations; no Legal Core');
  }finally{await app?.close();await socket?.stop();await embedded?.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
+

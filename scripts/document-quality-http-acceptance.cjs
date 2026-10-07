@@ -1,0 +1,21 @@
+const assert=require('node:assert/strict');
+module.exports=async({call,jwt})=>{
+ const project=await call('/api/docgrid/repositories','POST',{name:'Quality acceptance'},jwt('owner'),201),prefix='/api/docgrid/repositories/'+project.id;
+ const created=await call(prefix+'/artifacts','POST',{title:'Расчёт',content:'<!-- docgrid-richtext-v1 --><p>10 + 20 = 30</p>'},jwt('owner'),201);
+ const main=(await call(prefix+'/overview')).branches.find(b=>b.kind==='MAIN');
+ const work=await call(prefix+'/branches','POST',{name:'Проверка',fromBranchId:main.id,kind:'WORK'},jwt('owner'),201);
+ const endpoint='/api/docgrid/branches/'+work.id+'/documents/'+created.id;
+ const saved=await call(endpoint,'PUT',{revision:1,content:'<!-- docgrid-richtext-v1 --><p>10 + 20 = 40</p>',message:'Ошибка итога'});
+ assert.equal(saved.checks.errors,1);assert.match(saved.content,/data-dg-block/);
+ await call(endpoint+'/checks?revision=2','GET',undefined,null,401);await call(endpoint+'/checks?revision=2','GET',undefined,jwt('stranger'),404);
+ await call(endpoint+'/checks?revision=1','GET',undefined,jwt('owner'),409);
+ const checks=await call(endpoint+'/checks?revision=2');assert.equal(checks.contentHash,saved.checks.contentHash);assert.equal(checks.errors,1);
+ const review=await call('/api/docgrid/reviews','POST',{projectId:project.id,sourceBranchId:work.id,targetBranchId:main.id,title:'Проверка суммы'},jwt('owner'),201);
+ const before=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===created.id);
+ const failed=await call('/api/docgrid/reviews/'+review.id+'/merge','POST',{},jwt('owner'),400);assert.equal(failed.code,'DOCUMENT_CHECK_FAILED');assert.equal(failed.checks[0].errors,1);
+ const after=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===created.id);assert.equal(after.revision,before.revision);assert.equal(after.content,before.content);
+ const corrected=await call(endpoint,'PUT',{revision:2,content:saved.content.replace('= 40','= 30')+'<p>в течение 5 дней</p>',message:'Исправлен итог'});assert.equal(corrected.checks.errors,0);assert.equal(corrected.checks.warnings,1);
+ const fresh=await call('/api/docgrid/reviews','POST',{projectId:project.id,sourceBranchId:work.id,targetBranchId:main.id,title:'Исправленный расчёт'},jwt('owner'),201);
+ const merged=await call('/api/docgrid/reviews/'+fresh.id+'/merge','POST',{},jwt('owner'),200);assert.equal(merged.status,'MERGED');assert.equal(merged.checks[0].warnings,1);
+ console.log('PASS document quality HTTP ACL, exact saved revision, rejected merge is atomic, corrected merge permits warnings');
+};

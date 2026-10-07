@@ -5,7 +5,7 @@ import type { Response } from 'express';
 import { DocGridRelocateMaterialDto,DocGridFolderDto,DocGridTrashDto,DocGridMemberDto,DocGridRestoreDto,DocGridCommentDto } from './docgrid.dto';
 import {
   Headers, UploadedFile, UseInterceptors, StreamableFile, Res, Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe,
-  Post, Put, Query, UseGuards, Delete,
+  Post, Put, Query, UseGuards, Delete, ParseIntPipe,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -55,6 +55,8 @@ export class DocGridController {
   relocate(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string,@Body() dto:DocGridRelocateMaterialDto) {return this.docgrid.relocateMaterial(user,project,id,dto);}
   @Get('repositories/:projectId/materials/:id/text')
   text(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string){return this.docgrid.materialText(user,project,id);}
+  @Get('repositories/:projectId/materials/:id/office-view')
+  officeView(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string,@Res({passthrough:true}) response:Response){response.setHeader('Cache-Control','no-store');return this.docgrid.materialOfficeView(user,project,id);}
   @Post('repositories/:projectId/materials/:id/extract')
   extract(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Param('id',ParseUUIDPipe) id:string){return this.docgrid.reextractMaterial(user,project,id);}
   @Get('repositories/:projectId/materials/:id/download')
@@ -147,6 +149,9 @@ export class DocGridController {
   ) {
     return this.docgrid.listBranchDocuments(userId, branchId);
   }
+
+  @Get('branches/:branchId/documents/:documentId/checks')
+  checks(@CurrentUser('id') user:string,@Param('branchId',ParseUUIDPipe) branch:string,@Param('documentId',ParseUUIDPipe) doc:string,@Query('revision',ParseIntPipe) revision:number,@Res({passthrough:true}) response:Response){response.setHeader('Cache-Control','no-store');return this.docgrid.documentChecks(user,branch,doc,revision);}
 
   @Put('branches/:branchId/documents/:documentId')
   saveBranchDocument(
@@ -302,3 +307,4 @@ export class DocGridAdminController {
     return this.docgrid.adminEvents(Number.isFinite(limit) ? limit : 100);
   }
 }
+

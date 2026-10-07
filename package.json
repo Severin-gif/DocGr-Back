@@ -8,7 +8,7 @@
     "start": "node dist/server.js",
     "check": "prisma generate && tsc --noEmit",
     "test": "npm run build && node --test dist/*.test.js && npm run test:domain",
-    "test:domain": "node scripts/docgrid-core-test.cjs && node scripts/astra-docgrid-test.cjs && node scripts/docgrid-upload-extraction-test.cjs",
+    "test:domain": "node scripts/docgrid-core-test.cjs && node scripts/astra-docgrid-test.cjs && node scripts/docgrid-upload-extraction-test.cjs && node scripts/office-view-test.cjs",
     "db:migrate": "node scripts/migrate.cjs",
     "test:postgres": "node scripts/standalone-http-test.cjs",
     "test:embedded": "npm run build && node scripts/standalone-http-test.cjs --embedded"
@@ -51,3 +51,4 @@
     "node": ">=24"
   }
 }
+
