@@ -105,3 +105,12 @@ test("marks materials upload as multipart and download as binary", () => {
   assert.equal(resolveDocGridRoute("GET", "/api/docgrid/repositories", q)?.body, "json");
   assert.equal(resolveDocGridRoute("GET", "/api/docgrid/repositories", q)?.response, "json");
 });
+
+
+test("document check routes accept a single bounded revision and reject unrelated queries",()=>{
+ const path='/api/docgrid/branches/22222222-2222-4222-8222-222222222222/documents/33333333-3333-4333-8333-333333333333/checks';
+ assert.equal(isAllowedDocGridRequest('GET',path,new URLSearchParams('revision=2')),true);
+ for(const query of ['revision=0','revision=-1','revision=1000000000','revision=1&revision=2','revision=2&owner=other'])assert.equal(isAllowedDocGridRequest('GET',path,new URLSearchParams(query)),false);
+ assert.equal(isAllowedDocGridRequest('POST',path,new URLSearchParams('revision=2')),false);
+});
+

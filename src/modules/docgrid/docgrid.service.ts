@@ -1,4 +1,6 @@
 import { AiTimeBudgetService } from './ai-time-budget.service';
+import { checkDocument, normalizeDocumentContent } from './document-quality';
+import { officeView } from './office-view';
 import { ProjectContextService } from './project-context.service';
 import { isOcrMaterial } from './docgrid-ocr';
 import { ForbiddenException, BadGatewayException, BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
@@ -177,7 +179,7 @@ export class DocGridService {
       const title = dto.title.trim();
       if (!title) throw new BadRequestException('Название документа обязательно');
       const path = this.cleanPath(dto.path);
-      const content = dto.content ?? '';
+      const content = normalizeDocumentContent(dto.content ?? '');
       const document = await tx.workspaceDocument.create({
         data: {
           projectId,
@@ -222,7 +224,7 @@ export class DocGridService {
         commitId: commits[0].id,
         hash,
       });
-      return { ...document, branchId: main.id, revision: 1, commit: commits[0] };
+      return { ...document, branchId: main.id, revision: 1, commit: commits[0], checks:checkDocument(content,1) };
     });
   }
 
@@ -321,6 +323,15 @@ export class DocGridService {
     });
   }
 
+  async documentChecks(ownerId:string,branchId:string,documentId:string,revision:number) {
+    if(!Number.isInteger(revision)||revision<1||revision>999999999)throw new BadRequestException("Неверный номер редакции");
+    const branch=await this.requireBranch(this.prisma,ownerId,branchId);
+    const rows=await this.prisma.$queryRaw<Array<{content:string;revision:number}>>`SELECT bd.content,bd.revision FROM docgrid.docgrid_branch_documents bd JOIN docgrid.workspace_documents d ON d.id=bd.document_id WHERE bd.branch_id=${branch.id}::uuid AND bd.document_id=${documentId}::uuid AND d.docgrid_deleted_at IS NULL`;
+    if(!rows[0])throw new NotFoundException('Документ отсутствует в варианте');
+    if(rows[0].revision!==revision)throw new ConflictException('Редакция изменилась. Повторите проверку текущей версии.');
+    return {...checkDocument(rows[0].content,revision),documentId,branchId};
+  }
+
   private hashCommit(branchId: string, documentId: string, revision: number, message: string, content: string) {
     return createHash('sha256').update([branchId, documentId, String(revision), message, content].join('\0')).digest('hex');
   }
@@ -358,6 +369,7 @@ export class DocGridService {
   }
 
   async saveBranchDocument(ownerId: string, branchId: string, documentId: string, dto: SaveDocGridBranchDocumentDto) {
+    dto={...dto,content:normalizeDocumentContent(dto.content)};
     return this.prisma.$transaction(async tx => {
       const branch = await this.requireBranch(tx, ownerId, branchId);
       await this.requireRepo(tx, ownerId, branch.projectId, 'write');
@@ -382,7 +394,7 @@ export class DocGridService {
         await tx.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET base_content=${targetRows[0].content},base_branch_id=${target.id}::uuid WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
         await this.event(tx,branch.projectId,ownerId,'conflict.resolved','document',documentId,{sourceBranchId:branchId,targetBranchId:target.id,targetRevision:dto.targetRevision});
       }
-      if (current.content === dto.content && !dto.targetBranchId) return { ...current, commit: null };
+      if (current.content === dto.content && !dto.targetBranchId) return { ...current, commit: null, checks:checkDocument(current.content,current.revision) };
 
       const nextRevision = current.revision + 1;
       const hash = this.hashCommit(branchId, documentId, nextRevision, dto.message.trim(), dto.content);
@@ -405,7 +417,7 @@ export class DocGridService {
       await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branchId}::uuid`;
       await tx.$executeRaw`UPDATE docgrid.workspace_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branch.projectId}::uuid`;
       await this.event(tx, branch.projectId, ownerId, 'commit.created', 'commit', commits[0].id, { branch: branch.name, documentId, revision: nextRevision, hash });
-      return { ...current, content: dto.content, revision: nextRevision, headCommitId: commits[0].id, workspaceVersion, commit: commits[0] };
+      return { ...current, content: dto.content, revision: nextRevision, headCommitId: commits[0].id, workspaceVersion, commit: commits[0], checks:checkDocument(dto.content,nextRevision) };
     });
   }
 
@@ -589,9 +601,14 @@ export class DocGridService {
         return { conflict:true, code:'CONFLICT', message:stale?'Версии изменились. Проверьте изменения и обновите PR.':'Исправьте конфликтующие документы перед слиянием.', documents:conflicts.map(r=>r.documentId) };
       }
 
+      // Check the actual proposed merged text, including independent target edits.
+      const checks=changed.map(row=>({documentId:row.documentId,title:row.title,...checkDocument(normalizeDocumentContent(mergeText(row.baseContent,row.sourceContent??'',row.targetContent??'').content),(row.targetRevision??0)+1)}));
+      const failed=checks.filter(check=>check.errors>0);
+      if(failed.length)throw new BadRequestException({code:'DOCUMENT_CHECK_FAILED',message:'Слияние остановлено: '+failed.map(check=>check.title+': '+(check.issues.filter(i=>i.severity==='error').map(i=>i.message).join('; ')||'найдены ошибки вне первых 200 замечаний')).join(' · ')+'. Откройте рабочую редакцию и исправьте расхождения.',checks:failed});
+
       for (const row of changed) {
         const before = row.targetContent ?? '';
-        const after = mergeText(row.baseContent,row.sourceContent ?? '',before).content;
+        const after = normalizeDocumentContent(mergeText(row.baseContent,row.sourceContent ?? '',before).content);
         const nextRevision = (row.targetRevision ?? 0) + 1;
         const message = `Приняты правки: ${review.title}`;
         const hash = this.hashCommit(target.id, row.documentId, nextRevision, message, after);
@@ -634,8 +651,8 @@ export class DocGridService {
         WHERE id = ${reviewId}::uuid
       `;
       await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${target.id}::uuid`;
-      await this.event(tx, review.projectId, ownerId, 'review.merged', 'review', review.id, { source: source.name, target: target.name, documents: changed.length });
-      return { ...review, status: 'MERGED', mergedBy: ownerId, mergedAt: new Date() };
+      await this.event(tx, review.projectId, ownerId, 'review.merged', 'review', review.id, { source: source.name, target: target.name, documents: changed.length,checks:checks.map(c=>({documentId:c.documentId,contentHash:c.contentHash,errors:c.errors,warnings:c.warnings,engineVersion:c.engineVersion})) });
+      return { ...review, checks, status: 'MERGED', mergedBy: ownerId, mergedAt: new Date() };
     });
     if ('conflict' in result) throw new ConflictException(result);
     return result;
@@ -1055,6 +1072,15 @@ export class DocGridService {
     if(!rows[0])throw new NotFoundException('Материал не найден');
     return rows[0];
   }
+  async materialOfficeView(user:string,project:string,id:string) {
+    // Check access and size before fetching the original from object storage.
+    await this.requireRepo(this.prisma,user,project);
+    const rows=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    if(!rows[0])throw new NotFoundException('Материал не найден');
+    if(Number(rows[0].byte_size)>PDF_EXTRACTION_MAX_BYTES)throw new BadRequestException('Просмотр ограничен файлами до 32 МБ. Оригинал можно скачать.');
+    const file=await this.material(user,project,id);
+    return officeView(file.title,Buffer.from(file.bytes));
+  }
   async reextractMaterial(user:string,project:string,id:string) {
     await this.requireRepo(this.prisma,user,project,'write');
     const metadata=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
@@ -1181,3 +1207,4 @@ export class DocGridService {
     `;
   }
 }
+
