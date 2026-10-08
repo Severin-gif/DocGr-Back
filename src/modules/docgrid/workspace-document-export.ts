@@ -4,7 +4,7 @@ import { DOCX_PAGE, DOCX_STRUCTURE_VERSION, DOCUMENT_STYLE, documentRole, docume
 import { parseFragment, DefaultTreeAdapterMap } from 'parse5';
 
 type Node = DefaultTreeAdapterMap['node'];
-type Context = {role?:DocumentRole;indent?:{left?:number;right?:number;firstLine?:number;hanging?:number};spacing?:{before?:number;after?:number;line?:number;lineRule?:typeof LineRuleType[keyof typeof LineRuleType]};listItem?:{used:boolean};heading?:typeof HeadingLevel[keyof typeof HeadingLevel];numbering?:{reference:string;level:number;ordered?:boolean};table?:boolean;alignment?:typeof AlignmentType[keyof typeof AlignmentType]};
+type Context = {listDepth?:number;role?:DocumentRole;indent?:{left?:number;right?:number;firstLine?:number;hanging?:number};spacing?:{before?:number;after?:number;line?:number;lineRule?:typeof LineRuleType[keyof typeof LineRuleType]};listItem?:{used:boolean};heading?:typeof HeadingLevel[keyof typeof HeadingLevel];numbering?:{reference:string;level:number;ordered?:boolean};table?:boolean;alignment?:typeof AlignmentType[keyof typeof AlignmentType]};
 type Style = {font?:string;size?:number; bold?: boolean; italics?: boolean; underline?: {type:typeof UnderlineType.SINGLE}; color?:string; shading?:{type:typeof ShadingType.CLEAR;fill:string} };
 const richPrefix='<!-- docgrid-richtext-v1 -->';
 function color(value:string):string|undefined {
@@ -23,7 +23,7 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
   const listReference=(ordered:boolean)=>{const reference='list-'+numbering.length;numbering.push({reference,levels:Array.from({length:9},(_,level)=>({level,format:ordered?(level===2?LevelFormat.RUSSIAN_LOWER:LevelFormat.DECIMAL):LevelFormat.BULLET,text:ordered&&level===2?'%3)':ordered?Array.from({length:level+1},(_,i)=>'%'+(i+1)).join('.')+'.':'•',alignment:AlignmentType.LEFT,style:{paragraph:{indent:{left:709*(level+1),hanging:360}}}}))});return reference;};
   if(content.startsWith(richPrefix)) {
     const fragment=parseFragment(content.slice(richPrefix.length));let runs:TextRun[]=[];
-    const flush=(context:Context={})=>{const continuation=context.numbering&&context.listItem?.used;if(context.listItem)context.listItem.used=true;paragraphs.push(new Paragraph({children:runs,heading:context.heading,style:context.heading?undefined:context.table?'DocGridTable':DOCUMENT_STYLE[context.role??'body'],numbering:continuation?undefined:context.numbering,alignment:context.alignment,indent:context.indent||(context.numbering?{left:709*(context.numbering.level+1),hanging:continuation?0:360,firstLine:0}:context.heading||context.table||context.alignment===AlignmentType.CENTER||context.alignment===AlignmentType.RIGHT?{firstLine:0}:undefined),spacing:context.spacing}));runs=[];};
+    const flush=(context:Context={})=>{const continuation=context.numbering&&context.listItem?.used;if(context.listItem)context.listItem.used=true;paragraphs.push(new Paragraph({children:runs,heading:context.heading,style:context.heading?undefined:context.table?'DocGridTable':DOCUMENT_STYLE[context.role??'body'],numbering:continuation?undefined:context.numbering,alignment:context.alignment,indent:context.indent||(context.numbering?{left:709*((context.listDepth??context.numbering.level)+1),hanging:continuation?0:360,firstLine:0}:context.heading||context.table||context.alignment===AlignmentType.CENTER||context.alignment===AlignmentType.RIGHT?{firstLine:0}:undefined),spacing:context.spacing}));runs=[];};
     const walk=(node:Node,inherited:Style={},depth=0,context:Context={})=>{
       if(depth>100)throw new Error('Слишком сложное оформление документа');
       if(node.nodeName==='#text'){if(depth===0&&!(node as DefaultTreeAdapterMap['textNode']).value.trim())return;runs.push(new TextRun({text:(node as DefaultTreeAdapterMap['textNode']).value,...inherited}));return;}
@@ -32,6 +32,7 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
       if(node.tagName==='table') {
         if(runs.length)flush(context);
         const output=paragraphs, rows:TableRow[]=[];
+        let leadingHeaders=true;
         const collectRows=(n:Node):DefaultTreeAdapterMap['element'][] => {
           if(!('tagName' in n))return [];
           if(n.tagName==='tr')return [n];
@@ -39,15 +40,18 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
         };
         for(const row of collectRows(node)) {
           const cells:TableCell[]=[];
+          const htmlCells=row.childNodes.filter((cell):cell is DefaultTreeAdapterMap['element']=>'tagName' in cell&&['td','th'].includes(cell.tagName));
+          const tableHeader=leadingHeaders&&htmlCells.length>0&&htmlCells.every(cell=>cell.tagName==='th');
+          if(htmlCells.length&&!tableHeader)leadingHeaders=false;
           for(const cell of row.childNodes) {
             if(!('tagName' in cell)||!['td','th'].includes(cell.tagName))continue;
             paragraphs=[];runs=[];
-            cell.childNodes.forEach(child=>walk(child,inherited,depth+1,{table:true}));
+            walk(cell,inherited,depth+1,{table:true});
             if(runs.length)flush({table:true});
             const span=Number(cell.attrs.find(a=>a.name==='colspan')?.value||1);
             cells.push(new TableCell({children:paragraphs.length?paragraphs:[new Paragraph('')],columnSpan:Number.isInteger(span)&&span>0&&span<=100?span:1}));
           }
-          if(cells.length)rows.push(new TableRow({children:cells}));
+          if(cells.length)rows.push(new TableRow({children:cells,tableHeader:tableHeader||undefined}));
         }
         paragraphs=output;runs=[];
         if(rows.length)paragraphs.push(new Table({rows,width:{size:100,type:WidthType.PERCENTAGE}}));
@@ -55,8 +59,12 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
       }
       if(['ul','ol'].includes(node.tagName)){
         if(runs.length)flush(context);
-        const reference=node.tagName==='ol'&&context.numbering?.ordered?context.numbering.reference:listReference(node.tagName==='ol'),level=Math.min(8,(context.numbering?.level??-1)+1);
-        node.childNodes.forEach(child=>walk(child,inherited,depth+1,{...context,numbering:{reference,level,ordered:node.tagName==='ol'}}));return;
+        // A new counter starts at level zero; visual depth is independent.
+        const reuse=node.tagName==='ol'&&context.numbering?.ordered;
+        const reference=reuse?context.numbering!.reference:listReference(node.tagName==='ol');
+        const level=reuse?Math.min(8,context.numbering!.level+1):0;
+        const listDepth=Math.min(8,(context.listDepth??-1)+1);
+        node.childNodes.forEach(child=>walk(child,inherited,depth+1,{...context,listDepth,numbering:{reference,level,ordered:node.tagName==='ol'}}));return;
       }
       const block=['p','div','li','h1','h2','h3','h4','h5','h6'].includes(node.tagName);if(block&&runs.length)flush(context);
       const heading=/^h[1-6]$/.test(node.tagName)?(['Heading1','Heading2','Heading3','Heading4','Heading5','Heading6'] as const)[Number(node.tagName[1])-1]:context.heading;
@@ -64,7 +72,7 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
       const next:Context={...context,heading,role:documentRole(node.attrs.find(a=>a.name==='data-dg-role')?.value,textOf(node)),...(node.tagName==='li'?{listItem:{used:false}}:{})};
       if(node.tagName==='br'){runs.push(new TextRun({break:1}));return;}
       const style={...inherited};
-      if(['b','strong'].includes(node.tagName))style.bold=true;
+      if(['b','strong','th'].includes(node.tagName))style.bold=true;
       if(['i','em'].includes(node.tagName))style.italics=true;
       if(node.tagName==='u')style.underline={type:UnderlineType.SINGLE};
       const css=node.attrs.find(a=>a.name==='style')?.value||'';
