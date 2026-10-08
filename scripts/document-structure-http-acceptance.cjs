@@ -28,6 +28,7 @@ module.exports=async({call,jwt,base,db})=>{
  const zip=await JSZip.loadAsync(merged),xml=await zip.file('word/document.xml').async('string');assert.match(xml,/Новый абзац/);assert.match(xml,/Heading2/);assert.doesNotMatch(xml,/= 40/);
  // Pre-migration records are upgraded without changing their revision or projection.
  await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ const beforeConversion=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(beforeConversion.fileFormat,'docx','legacy documents open through the DOCX reader');assert.equal(beforeConversion.formatVersion,null);
  const legacy=await bytes(path(main.id,current.revision));assert.deepEqual(await bytes(path(main.id,current.revision)),legacy);
  const unchanged=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(unchanged.revision,current.revision);assert.equal(unchanged.content,current.content);
  await call(root+'/document-draft.docx','POST',{content:'# Черновик'},jwt('stranger'),404);

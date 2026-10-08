@@ -330,7 +330,7 @@ export class DocGridService {
       if (branch.name === 'main') await this.ensureMainBranch(tx, ownerId, branch.projectId);
       return tx.$queryRaw<BranchDocumentRow[]>`
         SELECT bd.branch_id AS "branchId", bd.document_id AS "documentId", d.title, d.path,
-               bd.revision, bd.content, CASE WHEN bd.docx_bytes IS NOT NULL THEN 'docx' END AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
+               bd.revision, bd.content, 'docx'::text AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
                bd.workspace_version AS "workspaceVersion", bd.updated_at AS "updatedAt"
         FROM docgrid.docgrid_branch_documents bd
         JOIN docgrid.workspace_documents d ON d.id = bd.document_id
@@ -393,7 +393,7 @@ export class DocGridService {
       if (branch.name === 'main') throw new ForbiddenException('Основной вариант изменяется только через PR. Создайте рабочий вариант.');
       const rows = await tx.$queryRaw<BranchDocumentRow[]>`
         SELECT bd.branch_id AS "branchId", bd.document_id AS "documentId", d.title, d.path,
-               bd.revision, bd.content, CASE WHEN bd.docx_bytes IS NOT NULL THEN 'docx' END AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
+               bd.revision, bd.content, 'docx'::text AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
                bd.workspace_version AS "workspaceVersion", bd.updated_at AS "updatedAt"
         FROM docgrid.docgrid_branch_documents bd
         JOIN docgrid.workspace_documents d ON d.id = bd.document_id
@@ -412,7 +412,7 @@ export class DocGridService {
         await this.event(tx,branch.projectId,ownerId,'conflict.resolved','document',documentId,{sourceBranchId:branchId,targetBranchId:target.id,targetRevision:dto.targetRevision});
       }
       if (current.content === dto.content && !dto.targetBranchId) {
-        if (!current.fileFormat) await this.persistDocx(tx, branchId, documentId, current.headCommitId, current.content);
+        if (!current.formatVersion) await this.persistDocx(tx, branchId, documentId, current.headCommitId, current.content);
         return { ...current, fileFormat: 'docx', formatVersion: current.formatVersion || DOCX_STRUCTURE_VERSION, commit: null, checks:checkDocument(current.content,current.revision) };
       }
 
