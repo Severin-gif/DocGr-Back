@@ -79,8 +79,13 @@ export type DocumentIssue = {id:string;severity:'error'|'warning';rule:string;me
 export type DocumentCheck = {engineVersion:string;revision:number;contentHash:string;issues:DocumentIssue[];checkedBlocks:number;errors:number;warnings:number;limitations:string[]};
 export function contentHash(content:string){return createHash('sha256').update(content).digest('hex');}
 const currency=(s:string):string|undefined => /₽|руб(?:\.|лей|ля|ль)?/i.test(s)?'RUB':/\$|USD|доллар/i.test(s)?'USD':/€|EUR|евро/i.test(s)?'EUR':undefined;
+const moneyNumber=String.raw`-?\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d{1,2})?`;
+const moneyUnit=String.raw`₽|руб(?:\.|лей|ля|ль)?|\$|USD|доллар(?:ов|а)?|€|EUR|евро`;
+const moneyToken=String.raw`${moneyNumber}\s*(?:${moneyUnit})?`;
+const moneyPattern=new RegExp(String.raw`^\s*(${moneyNumber})\s*(${moneyUnit})?\s*$`,'i');
+const equationPattern=new RegExp(String.raw`(?<![\d.,])((?:${moneyToken}\s*\+\s*)+${moneyToken})\s*=\s*(${moneyToken})(?![\d,\p{L}]|\.\d)`,'giu');
 function money(s:string):{value:bigint;unit?:string}|null {
-  const m=/^\s*(-?\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d{1,2})?)\s*(₽|руб(?:\.|лей|ля|ль)?|\$|USD|доллар(?:ов|а)?|€|EUR|евро)?\s*$/i.exec(s);
+  const m=moneyPattern.exec(s);
   if(!m)return null;
   const value=m[1].replace(/[ \u00a0\u202f]/g,'').replace(',','.');
   const [integer,decimal='']=value.split('.');
@@ -115,9 +120,9 @@ export function checkDocument(content:string,revision:number):DocumentCheck {
     for(const m of b.text.matchAll(/(?:период\s+)?с\s+(\d{2}\.\d{2}\.\d{4})\s+(?:по|до)\s+(\d{2}\.\d{2}\.\d{4})/gi)){
       const from=date(m[1]),to=date(m[2]);if(from!==null&&to!==null&&from>to)issue('error','reversed_date_range','Конец периода раньше начала',`${m[1]} позднее ${m[2]}. Проверяется только явно записанный диапазон, без расчёта юридического срока.`,anchor(b,m[0],m.index));
     }
-    for(const m of b.text.matchAll(/(?:в течение|срок(?:\s+\S+){0,2}\s*[:—-])\s*(-\d+)\s+(?:(?:календарных|рабочих)\s+)?дней/gi))issue('error','negative_duration','Отрицательная продолжительность',`В выражении «${m[0]}» указано отрицательное число дней.`,anchor(b,m[0],m.index));
+    for(const m of b.text.matchAll(/(?:в течение|срок(?:\s+\S+){0,2}\s*[:—-])\s*(-\d+)\s+(?:(?:календарных|рабочих)\s+)?(?:день|дня|дней)(?!\p{L})/giu))issue('error','negative_duration','Отрицательная продолжительность',`В выражении «${m[0]}» указано отрицательное число дней.`,anchor(b,m[0],m.index));
     // Explicit equations only. Never add unrelated amounts mentioned in prose.
-    for(const m of b.text.matchAll(/(?<![\d.,])((?:-?\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d{1,2})?\s*(?:₽|руб\.?|USD|EUR|\$|€)?\s*\+\s*)+-?\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d{1,2})?\s*(?:₽|руб\.?|USD|EUR|\$|€)?)\s*=\s*(-?\d+(?:[ \u00a0\u202f]\d{3})*(?:[,.]\d{1,2})?\s*(?:₽|руб\.?|USD|EUR|\$|€)?)(?![\d.,])/g)){
+    for(const m of b.text.matchAll(equationPattern)){
       const terms=m[1].split('+').map(money),total=money(m[2]);if(!total||terms.some(t=>!t))continue;
       const units=new Set([...terms.map(t=>t?.unit),total.unit].filter(Boolean));if(units.size>1){issue('warning','mixed_units','В равенстве разные валюты','Без курса и даты пересчёта эти суммы нельзя складывать.',anchor(b,m[0],m.index));continue;}
       const sum=terms.reduce((v,t)=>v+t!.value,0n);
