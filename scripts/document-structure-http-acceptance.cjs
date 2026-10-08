@@ -1,0 +1,37 @@
+const assert=require('node:assert/strict');
+const JSZip=require('jszip');
+module.exports=async({call,jwt,base,db})=>{
+ const project=await call('/api/docgrid/repositories','POST',{name:'DOCX structure acceptance'},jwt('owner'),201),root='/api/docgrid/repositories/'+project.id;
+ const document=await call(root+'/artifacts','POST',{title:'Документ',content:'# Название\nПреамбула\n## 1. Раздел\n1.1. 10 + 20 = 30'},jwt('owner'),201);
+ assert.equal(document.fileFormat,'docx');
+ const main=(await call(root+'/overview')).branches.find(b=>b.kind==='MAIN');
+ const path=(branch,revision)=>root+'/branches/'+branch+'/documents/'+document.id+'/export?revision='+revision+'&format=docx';
+ const bytes=async url=>{const r=await fetch(base+url,{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(r.status,200,await (r.status!==200?r.text():Promise.resolve('')));return Buffer.from(await r.arrayBuffer());};
+ const original=await bytes(path(main.id,1));assert.equal(original.subarray(0,2).toString(),'PK');assert.deepEqual(await bytes(path(main.id,1)),original);
+ const [stored]=await db.$queryRaw`SELECT docx_bytes,format_version FROM docgrid.docgrid_branch_documents WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ assert.deepEqual(Buffer.from(stored.docx_bytes),original);assert.equal(stored.format_version,'docgrid-structure-v1');
+ const [commit]=await db.$queryRaw`SELECT docx_bytes FROM docgrid.docgrid_commits WHERE document_id=${document.id}::uuid`;
+ assert.deepEqual(Buffer.from(commit.docx_bytes),original);
+ const work=await call(root+'/branches','POST',{name:'Правки',fromBranchId:main.id},jwt('owner'),201);
+ assert.deepEqual(await bytes(path(work.id,1)),original);
+ const endpoint='/api/docgrid/branches/'+work.id+'/documents/'+document.id;
+ const changed=await call(endpoint,'PUT',{revision:1,content:'# Название\n## 1. Раздел\n10 + 20 = 40',message:'Ошибочная сумма'});
+ assert.equal(changed.fileFormat,'docx');assert.equal(changed.formatVersion,'docgrid-structure-v1');
+ const review=await call('/api/docgrid/reviews','POST',{projectId:project.id,sourceBranchId:work.id,targetBranchId:main.id,title:'Ошибочная правка'},jwt('owner'),201);
+ await call('/api/docgrid/reviews/'+review.id+'/merge','POST',{},jwt('owner'),400);
+ assert.deepEqual(await bytes(path(main.id,1)),original);
+ await call(endpoint,'PUT',{revision:2,content:'# Название\n## 1. Раздел\n10 + 20 = 30\nНовый абзац',message:'Исправлено'});
+ const fresh=await call('/api/docgrid/reviews','POST',{projectId:project.id,sourceBranchId:work.id,targetBranchId:main.id,title:'Верная правка'},jwt('owner'),201);
+ await call('/api/docgrid/reviews/'+fresh.id+'/merge','POST',{},jwt('owner'),200);
+ const current=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);
+ const merged=await bytes(path(main.id,current.revision));assert.notDeepEqual(merged,original);
+ const zip=await JSZip.loadAsync(merged),xml=await zip.file('word/document.xml').async('string');assert.match(xml,/Новый абзац/);assert.match(xml,/Heading2/);assert.doesNotMatch(xml,/= 40/);
+ // Pre-migration records are upgraded without changing their revision or projection.
+ await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ const legacy=await bytes(path(main.id,current.revision));assert.deepEqual(await bytes(path(main.id,current.revision)),legacy);
+ const unchanged=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(unchanged.revision,current.revision);assert.equal(unchanged.content,current.content);
+ await call(root+'/document-draft.docx','POST',{content:'# Черновик'},jwt('stranger'),404);
+ const recovery=await fetch(base+root+'/document-draft.docx',{method:'POST',headers:{authorization:'Bearer '+jwt('owner'),'content-type':'application/json'},body:JSON.stringify({content:'# Черновик'})});assert.equal(recovery.status,200);assert.equal(Buffer.from(await recovery.arrayBuffer()).subarray(0,2).toString(),'PK');
+ assert.equal((await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id).revision,current.revision);
+ console.log('PASS persisted DOCX creation/fork/repeat export/history/atomic rejected PR/accepted PR/legacy conversion/draft ACL');
+};

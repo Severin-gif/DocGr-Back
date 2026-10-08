@@ -84,7 +84,7 @@ test('DOCX uses canonical paragraphs, headings and lists without check decoratio
  const bytes=await renderWorkspaceDocx(rich('<h1>Договор</h1><p>Текст</p><ol><li><p>Первый</p><p>Продолжение пункта</p></li><li>Второй</li></ol><ul><li>Пункт</li></ul>'));
  const zip=await JSZip.loadAsync(bytes),xml=await zip.file('word/document.xml')!.async('string'),styles=await zip.file('word/styles.xml')!.async('string'),numbering=await zip.file('word/numbering.xml')!.async('string');
  assert.equal((xml.match(/<w:numPr>/g)||[]).length,3);
- assert.match(xml,/w:pStyle w:val="Heading1"/);assert.match(xml,/w:firstLine="709"/);assert.match(xml,/w:numPr/);assert.match(numbering,/w:numFmt w:val="decimal"/);assert.match(numbering,/w:numFmt w:val="bullet"/);assert.match(styles,/Times New Roman/);assert.doesNotMatch(xml,/data-dg-block|data-check|docgrid/);
+ assert.match(xml,/w:pStyle w:val="Heading1"/);assert.match(styles,/w:firstLine="709"/);assert.match(xml,/w:numPr/);assert.match(numbering,/w:numFmt w:val="decimal"/);assert.match(numbering,/w:numFmt w:val="bullet"/);assert.match(styles,/Times New Roman/);assert.doesNotMatch(xml,/data-dg-block|data-check|docgrid/);
 });
 
 test('canonical sanitation retains bounded Word layout but removes hostile style rules',()=>{

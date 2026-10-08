@@ -102,3 +102,9 @@ export class DocGridRelocateMaterialDto {
   @IsString() @MaxLength(500) path!: string;
 }
 
+
+
+export class ExportDocGridDraftDto {
+  @ApiProperty({ maxLength: 2_000_000 })
+  @IsString() @MaxLength(2_000_000) content!: string;
+}

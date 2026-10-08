@@ -1,3 +1,4 @@
+import { DOCX_STRUCTURE_VERSION } from './document-structure';
 import { BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocGridMaterialStorageService, readMaterialBytes } from './docgrid-material-storage.service';
@@ -13,7 +14,7 @@ import { join } from 'node:path';
 import JSZip from 'jszip';
 import { objectInput, stringInput, uuidInput, integerInput, assertKeys } from './astra/astra.contracts';
 
-type Item={kind:'material'|'document'|'artifact';id:string;title:string;label:string;role:'main'|'attachment';format:'original'|'docx'|'pdf';sha256?:string;revision?:number;branchId?:string;content?:string;structured?:StructuredLegalDocument;size?:number;status?:string};
+type Item={kind:'material'|'document'|'artifact';id:string;title:string;label:string;role:'main'|'attachment';format:'original'|'docx'|'pdf';sha256?:string;revision?:number;branchId?:string;content?:string;docxBase64?:string;docxHash?:string;structured?:StructuredLegalDocument;size?:number;status?:string};
 type PackageRow={id:string;group_id:string;version:number;title:string;metadata:{court:string;caseNumber:string;notes:string};items:Item[];created_at:Date};
 const hash=(value:string|Buffer)=>createHash('sha256').update(value).digest('hex');
 const optionalText=(input:Record<string,unknown>,key:string,max:number)=>stringInput(input[key]===''?{...input,[key]:undefined}:input,key,max,false);
@@ -26,9 +27,21 @@ export class CourtPackageService {
     const rows=await db.$queryRaw`SELECT p.id FROM docgrid.workspace_projects p WHERE p.id=${project}::uuid AND (p.owner_id=${user} OR EXISTS(SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${user} AND (${!write} OR m.role IN ('EDITOR','REVIEWER')))) FOR UPDATE OF p`;
     if(!rows.length)throw new NotFoundException('Проект не найден или недостаточно прав');
   }
-  private view(row:PackageRow){return {id:row.id,groupId:row.group_id,version:row.version,title:row.title,...row.metadata,createdAt:row.created_at,items:row.items.map(({content,structured,...item})=>item)};}
-  async list(user:string,project:string){await this.access(this.db,user,project);const rows=await this.db.$queryRaw<PackageRow[]>`SELECT id,group_id,version,title,metadata,created_at,(SELECT jsonb_agg(item-'content'-'structured') FROM jsonb_array_elements(items) item) AS items FROM docgrid.dg_court_packages WHERE project_id=${project}::uuid ORDER BY created_at DESC LIMIT 100`;return rows.map(r=>this.view(r));}
+  private view(row:PackageRow){return {id:row.id,groupId:row.group_id,version:row.version,title:row.title,...row.metadata,createdAt:row.created_at,items:row.items.map(({content,structured,docxBase64,...item})=>item)};}
+  async list(user:string,project:string){await this.access(this.db,user,project);const rows=await this.db.$queryRaw<PackageRow[]>`SELECT id,group_id,version,title,metadata,created_at,(SELECT jsonb_agg(item-'content'-'structured'-'docxBase64') FROM jsonb_array_elements(items) item) AS items FROM docgrid.dg_court_packages WHERE project_id=${project}::uuid ORDER BY created_at DESC LIMIT 100`;return rows.map(r=>this.view(r));}
   private async row(user:string,project:string,id:string){await this.access(this.db,user,project);const [row]=await this.db.$queryRaw<PackageRow[]>`SELECT * FROM docgrid.dg_court_packages WHERE id=${id}::uuid AND project_id=${project}::uuid`;if(!row)throw new NotFoundException('Комплект не найден');return row;}
+  private async documentSnapshot(db:any,row:any,branch:string,id:string):Promise<Buffer>{
+    if(row.docx_bytes){
+      const bytes=Buffer.from(row.docx_bytes);
+      if(hash(bytes)!==row.docx_sha256)throw new ConflictException('Контрольная сумма DOCX не совпадает');
+      return bytes;
+    }
+    // Lazy conversion for old revisions; the source text and revision stay intact.
+    const bytes=await renderWorkspaceDocx(row.content),digest=hash(bytes);
+    await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${DOCX_STRUCTURE_VERSION} WHERE branch_id=${branch}::uuid AND document_id=${id}::uuid AND revision=${row.revision} AND docx_bytes IS NULL`;
+    if(row.head_commit_id)await db.$executeRaw`UPDATE docgrid.docgrid_commits SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${DOCX_STRUCTURE_VERSION} WHERE id=${row.head_commit_id}::uuid AND docx_bytes IS NULL`;
+    return bytes;
+  }
   async capture(user:string,project:string,raw:unknown){
     const input=objectInput(raw);assertKeys(input,['title','court','caseNumber','notes','items','previousId']);
     const title=stringInput(input,'title',180),metadata={court:optionalText(input,'court',300),caseNumber:optionalText(input,'caseNumber',100),notes:optionalText(input,'notes',4000)};
@@ -49,14 +62,17 @@ export class CourtPackageService {
           item={kind:'material',id:sourceId,title:m.title,label:label||m.title,role:v.role as Item['role'],format:'original',sha256:m.sha256,size:Number(m.size),status:m.status};
         }else if(v.kind==='document'){
           const branch=uuidInput(v,'branchId'),revision=integerInput(v,'revision',1,2147483647);
-          const [d]=await tx.$queryRaw<any[]>`SELECT d.title,b.content,b.revision FROM docgrid.docgrid_branch_documents b JOIN docgrid.workspace_documents d ON d.id=b.document_id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE d.id=${sourceId}::uuid AND br.id=${branch}::uuid AND br.project_id=${project}::uuid AND d.project_id=${project}::uuid AND d.docgrid_deleted_at IS NULL`;
+          const [d]=await tx.$queryRaw<any[]>`SELECT d.title,b.content,b.revision,b.docx_bytes,b.docx_sha256,b.head_commit_id FROM docgrid.docgrid_branch_documents b JOIN docgrid.workspace_documents d ON d.id=b.document_id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE d.id=${sourceId}::uuid AND br.id=${branch}::uuid AND br.project_id=${project}::uuid AND d.project_id=${project}::uuid AND d.docgrid_deleted_at IS NULL`;
           if(!d)throw new NotFoundException('Редакция документа не найдена');if(d.revision!==revision)throw new ConflictException('Документ изменился. Обновите список и выберите актуальную редакцию.');
-          item={kind:'document',id:sourceId,title:d.title,label:label||d.title,role:v.role as Item['role'],format:v.format==='pdf'?'pdf':'docx',branchId:branch,revision,content:d.content,sha256:hash(d.content)};
+          const bytes=await this.documentSnapshot(tx,d,branch,sourceId);
+          item={kind:'document',id:sourceId,title:d.title,label:label||d.title,role:v.role as Item['role'],format:v.format==='pdf'?'pdf':'docx',branchId:branch,revision,content:d.content,docxBase64:bytes.toString('base64'),docxHash:hash(bytes),sha256:hash(d.content)};
         }else{
           const revision=integerInput(v,'revision',1,2147483647);
-          const rows=await tx.$queryRaw<any[]>`SELECT v.title,v.structured_content AS content FROM docgrid.document_versions v JOIN docgrid.dg_astra_documents a ON a.document_id=v.document_id WHERE a.project_id=${project}::uuid AND v.document_id=${sourceId}::uuid AND v.version=${revision}`;
+          const rows=await tx.$queryRaw<any[]>`SELECT v.title,v.structured_content AS content,v.docx_object_key,v.checksum FROM docgrid.document_versions v JOIN docgrid.dg_astra_documents a ON a.document_id=v.document_id WHERE a.project_id=${project}::uuid AND v.document_id=${sourceId}::uuid AND v.version=${revision}`;
           if(!rows[0])throw new NotFoundException('Версия подготовленного документа недоступна');
-          item={kind:'artifact',id:sourceId,title:rows[0].title,label:label||rows[0].title,role:v.role as Item['role'],format:v.format==='pdf'?'pdf':'docx',revision,structured:rows[0].content,sha256:hash(JSON.stringify(rows[0].content))};
+          const bytes=rows[0].docx_object_key?await this.files.read(rows[0].docx_object_key):await this.files.renderDocx(rows[0].content);
+          if(rows[0].checksum&&hash(bytes)!==rows[0].checksum)throw new ConflictException('Контрольная сумма DOCX подготовленного документа не совпадает');
+          item={kind:'artifact',id:sourceId,title:rows[0].title,label:label||rows[0].title,role:v.role as Item['role'],format:v.format==='pdf'?'pdf':'docx',revision,structured:rows[0].content,docxBase64:bytes.toString('base64'),docxHash:hash(bytes),sha256:hash(JSON.stringify(rows[0].content))};
         }
         items.push(item);
       }
@@ -86,13 +102,16 @@ export class CourtPackageService {
   }
   async documentFile(user:string,project:string,branch:string,id:string,revision:number,format:string){
     if(!['docx','pdf'].includes(format)||!Number.isSafeInteger(revision)||revision<1)throw new BadRequestException('Выберите формат и сохранённую редакцию');
-    await this.access(this.db,user,project);
-    const [row]=await this.db.$queryRaw<any[]>`SELECT d.title,b.content,b.revision FROM docgrid.docgrid_branch_documents b JOIN docgrid.workspace_documents d ON d.id=b.document_id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE b.branch_id=${branch}::uuid AND b.document_id=${id}::uuid AND br.project_id=${project}::uuid AND d.project_id=${project}::uuid AND d.docgrid_deleted_at IS NULL`;
-    if(!row)throw new NotFoundException('Документ не найден');if(row.revision!==revision)throw new ConflictException('Редакция изменилась. Обновите документ перед экспортом.');
-    let bytes=await renderWorkspaceDocx(row.content);
+    const saved=await this.db.$transaction(async tx=>{
+      await this.access(tx,user,project);
+      const [row]=await tx.$queryRaw<any[]>`SELECT d.title,b.content,b.revision,b.docx_bytes,b.docx_sha256,b.head_commit_id FROM docgrid.docgrid_branch_documents b JOIN docgrid.workspace_documents d ON d.id=b.document_id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE b.branch_id=${branch}::uuid AND b.document_id=${id}::uuid AND br.project_id=${project}::uuid AND d.project_id=${project}::uuid AND d.docgrid_deleted_at IS NULL FOR UPDATE OF b`;
+      if(!row)throw new NotFoundException('Документ не найден');if(row.revision!==revision)throw new ConflictException('Редакция изменилась. Обновите документ перед экспортом.');
+      return {title:row.title,bytes:await this.documentSnapshot(tx,row,branch,id)};
+    },{timeout:30000});
+    let bytes=saved.bytes;
     if(format==='pdf'){try{bytes=await this.files.convertDocxToPdf(bytes);}catch{throw new ServiceUnavailableException('Не удалось создать PDF. DOCX доступен; попробуйте PDF позже.');}}
     await this.access(this.db,user,project);
-    return {bytes,title:safeDownloadName(row.title)+'.'+format,mime:format==='pdf'?'application/pdf':'application/vnd.openxmlformats-officedocument.wordprocessingml.document'};
+    return {bytes,title:safeDownloadName(saved.title.replace(/\.docx$/i,''))+'.'+format,mime:format==='pdf'?'application/pdf':'application/vnd.openxmlformats-officedocument.wordprocessingml.document'};
   }
   async archive(user:string,project:string,id:string){
     const row=await this.row(user,project,id),check=await this.check(user,project,id);
@@ -109,7 +128,9 @@ export class CourtPackageService {
           if(!m||m.sha256!==item.sha256)throw new ConflictException('Оригинал недоступен');bytes=await readMaterialBytes(m,this.storage);
           if(hash(bytes)!==item.sha256)throw new ConflictException('Контрольная сумма оригинала не совпадает');extension=/\.[a-z0-9]{1,10}$/i.exec(item.title)?.[0]||'.bin';
         }else{
-          bytes=item.kind==='artifact'?await this.files.renderDocx(item.structured!):await renderWorkspaceDocx(item.content!);extension='.'+item.format;
+          bytes=item.docxBase64?Buffer.from(item.docxBase64,'base64'):item.kind==='artifact'?await this.files.renderDocx(item.structured!):await renderWorkspaceDocx(item.content!);
+          if(item.docxHash&&hash(bytes)!==item.docxHash)throw new ConflictException('Контрольная сумма сохранённой редакции DOCX не совпадает');
+          extension='.'+item.format;
           if(item.format==='pdf'){try{bytes=await this.files.convertDocxToPdf(bytes);}catch{throw new ServiceUnavailableException(`Не удалось создать PDF «${item.label}». Создайте новую версию комплекта с форматом DOCX или повторите позже.`);}}
         }
         total+=bytes.length;if(total>550*1024*1024)throw new BadRequestException('Результат сборки превышает 550 МБ');

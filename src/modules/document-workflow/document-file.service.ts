@@ -6,19 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import {
-  AlignmentType,
-  Document,
-  HeadingLevel,
-  LevelFormat,
-  Packer,
-  Paragraph,
-  TextRun,
-  Table,
-  TableCell,
-  TableRow,
-  WidthType,
-} from 'docx';
+import { documentRole } from '../docgrid/document-structure';
+import { renderWorkspaceDocx } from '../docgrid/workspace-document-export';
 import { S3Service } from '../../common/s3/s3.service';
 import type { StructuredLegalDocument } from './document-workflow.types';
 
@@ -121,102 +110,26 @@ export class DocumentFileService {
   }
 
   async renderDocx(content: StructuredLegalDocument): Promise<Buffer> {
-    const children: Array<Paragraph | Table> = [
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { after: 220 },
-        children: [new TextRun({ text: content.title, bold: true, size: 28 })],
-      }),
-    ];
-
-    if (content.subtitle) {
-      children.push(new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { after: 260 },
-        children: [new TextRun({ text: content.subtitle, italics: true, size: 22 })],
-      }));
-    }
-    if (content.addressee) {
-      children.push(new Paragraph({
-        alignment: AlignmentType.RIGHT,
-        spacing: { after: 240 },
-        children: [new TextRun({ text: content.addressee, size: 22 })],
-      }));
-    }
-    if (content.introduction) children.push(this.bodyParagraph(content.introduction));
-
+    // Same roles and page styles as manual revisions; no document-type template here.
+    const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const paragraph = (text: string, role = documentRole(undefined, text)) => `<p data-dg-role="${role}">${escape(text).replace(/\n/g, '<br>')}</p>`;
+    const blocks = ['<h1>' + escape(content.title) + '</h1>'];
+    if (content.subtitle) blocks.push(paragraph(content.subtitle, 'note'));
+    if (content.addressee) blocks.push(paragraph(content.addressee, 'address'));
+    if (content.introduction) blocks.push(paragraph(content.introduction));
     for (const section of content.sections) {
-      if (section.heading) {
-        children.push(new Paragraph({
-          heading: HeadingLevel.HEADING_2,
-          spacing: { before: 240, after: 120 },
-          children: [new TextRun({ text: section.heading, bold: true, size: 24 })],
-        }));
-      }
-      for (const paragraph of section.paragraphs) children.push(this.bodyParagraph(paragraph));
+      if (section.heading) blocks.push('<h2>' + escape(section.heading) + '</h2>');
+      blocks.push(...section.paragraphs.map(text => paragraph(text)));
       for (const table of section.tables ?? []) {
-        const rows: TableRow[] = [];
-        const makeRow = (cells: string[], header: boolean) => new TableRow({
-          tableHeader: header,
-          children: cells.map(text => new TableCell({ children: [new Paragraph({
-            spacing: { after: 60 }, children: [new TextRun({ text, bold: header, size: 22 })],
-          })] })),
-        });
-        if (table.headers?.length) rows.push(makeRow(table.headers, true));
-        table.rows.forEach(row => rows.push(makeRow(row, false)));
-        children.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }));
+        const row = (cells: string[], tag: 'td' | 'th') => '<tr>' + cells.map(text => `<${tag}>${escape(text)}</${tag}>`).join('') + '</tr>';
+        blocks.push('<table>' + (table.headers?.length ? row(table.headers, 'th') : '') + table.rows.map(cells => row(cells, 'td')).join('') + '</table>');
       }
     }
-
     if (content.requests?.length) {
-      children.push(new Paragraph({
-        heading: HeadingLevel.HEADING_2,
-        spacing: { before: 260, after: 100 },
-        children: [new TextRun({ text: 'ПРОШУ:', bold: true, size: 24 })],
-      }));
-      content.requests.forEach((request, index) => children.push(new Paragraph({
-        numbering: { reference: 'requests', level: 0 },
-        spacing: { after: 100, line: 360 },
-        children: [new TextRun({ text: request, size: 24 })],
-      })));
+      blocks.push('<h2>ПРОШУ:</h2><ol>' + content.requests.map(text => '<li>' + escape(text) + '</li>').join('') + '</ol>');
     }
-
-    for (const line of content.signatureBlock ?? []) {
-      children.push(new Paragraph({
-        spacing: { before: 180 },
-        children: [new TextRun({ text: line, size: 24 })],
-      }));
-    }
-
-    const document = new Document({
-      numbering: {
-        config: [{
-          reference: 'requests',
-          levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '%1.', alignment: AlignmentType.LEFT }],
-        }],
-      },
-      sections: [{
-        properties: {
-          page: { margin: { top: 1134, right: 850, bottom: 1134, left: 1701 } },
-        },
-        children,
-      }],
-      styles: {
-        default: {
-          document: { run: { font: 'Times New Roman', size: 24 } },
-        },
-      },
-    });
-    return Packer.toBuffer(document);
-  }
-
-  private bodyParagraph(text: string): Paragraph {
-    return new Paragraph({
-      alignment: AlignmentType.JUSTIFIED,
-      indent: { firstLine: 709 },
-      spacing: { after: 120, line: 360 },
-      children: [new TextRun({ text, size: 24 })],
-    });
+    blocks.push(...(content.signatureBlock ?? []).map(text => paragraph(text, 'signature')));
+    return renderWorkspaceDocx('<!-- docgrid-richtext-v1 -->' + blocks.join(''));
   }
 
   async convertDocxToPdf(docx: Buffer): Promise<Buffer> {
@@ -239,5 +152,3 @@ export class DocumentFileService {
     }
   }
 }
-
-

@@ -1,4 +1,5 @@
 import { safeDocumentStyle } from './document-format';
+import { DOCUMENT_ROLES } from './document-structure';
 import { createHash } from 'node:crypto';
 import { parseFragment, serialize, DefaultTreeAdapterMap } from 'parse5';
 
@@ -39,6 +40,7 @@ export function normalizeDocumentContent(content:string):string {
       const attrs=n.attrs.flatMap(a=>{
         if(a.name==='style'){const css=safeCss(a.value);return css?[{name:'style',value:css}]:[];}
         if(['colspan','rowspan'].includes(a.name)&&['td','th'].includes(n.tagName)&&/^\d{1,3}$/.test(a.value)&&Number(a.value)>0&&Number(a.value)<=100)return [a];
+        if(a.name==='data-dg-role'&&blockTags.has(n.tagName)&&DOCUMENT_ROLES.includes(a.value as typeof DOCUMENT_ROLES[number]))return [a];
         if(a.name==='data-dg-block'&&blockTags.has(n.tagName)&&/^b-[a-zA-Z0-9_-]{1,64}$/.test(a.value))return [a];
         return [];
       });

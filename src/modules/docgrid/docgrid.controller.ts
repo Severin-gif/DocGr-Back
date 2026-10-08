@@ -13,6 +13,7 @@ import { DocGridIdentityGuard } from './docgrid-identity.guard';
 import { DocGridAdminGuard } from './docgrid-admin.guard';
 import {
   CreateDocGridArtifactDto,
+  ExportDocGridDraftDto,
   CreateDocGridBranchDto,
   CreateDocGridIssueDto,
   CreateDocGridRepositoryDto,
@@ -31,6 +32,15 @@ import { DOCGRID_PROJECT_MAX_BYTES, DocGridService } from './docgrid.service';
 @Controller('api/docgrid')
 export class DocGridController {
   constructor(private readonly docgrid: DocGridService, private readonly agents: AstraService) {}
+
+  @Post('repositories/:projectId/document-draft.docx')
+  @HttpCode(HttpStatus.OK)
+  async draftDocx(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Body() dto:ExportDocGridDraftDto,@Res({passthrough:true}) response:Response){
+    const bytes=await this.docgrid.draftDocx(user,project,dto.content);
+    response.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    response.setHeader('Cache-Control','no-store');
+    return new StreamableFile(bytes);
+  }
 
   @Post('repositories/:projectId/search')
   search(@CurrentUser('id') user:string,@Param('projectId',ParseUUIDPipe) project:string,@Body() input:unknown){return this.agents.humanSearch(user,project,input);}
@@ -307,4 +317,3 @@ export class DocGridAdminController {
     return this.docgrid.adminEvents(Number.isFinite(limit) ? limit : 100);
   }
 }
-

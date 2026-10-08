@@ -1,9 +1,10 @@
 import { Document, Packer, Paragraph, TextRun, UnderlineType, ShadingType, Table, TableRow, TableCell, WidthType, AlignmentType, HeadingLevel, LevelFormat, LineRuleType } from 'docx';
 import {safeDocumentStyle} from './document-format';
+import { DOCX_PAGE, DOCX_STRUCTURE_VERSION, DOCUMENT_STYLE, documentRole, documentStructureStyles, type DocumentRole } from './document-structure';
 import { parseFragment, DefaultTreeAdapterMap } from 'parse5';
 
 type Node = DefaultTreeAdapterMap['node'];
-type Context = {indent?:{left?:number;right?:number;firstLine?:number;hanging?:number};spacing?:{before?:number;after?:number;line?:number;lineRule?:typeof LineRuleType[keyof typeof LineRuleType]};listItem?:{used:boolean};heading?:typeof HeadingLevel[keyof typeof HeadingLevel];numbering?:{reference:string;level:number};table?:boolean;alignment?:typeof AlignmentType[keyof typeof AlignmentType]};
+type Context = {role?:DocumentRole;indent?:{left?:number;right?:number;firstLine?:number;hanging?:number};spacing?:{before?:number;after?:number;line?:number;lineRule?:typeof LineRuleType[keyof typeof LineRuleType]};listItem?:{used:boolean};heading?:typeof HeadingLevel[keyof typeof HeadingLevel];numbering?:{reference:string;level:number;ordered?:boolean};table?:boolean;alignment?:typeof AlignmentType[keyof typeof AlignmentType]};
 type Style = {font?:string;size?:number; bold?: boolean; italics?: boolean; underline?: {type:typeof UnderlineType.SINGLE}; color?:string; shading?:{type:typeof ShadingType.CLEAR;fill:string} };
 const richPrefix='<!-- docgrid-richtext-v1 -->';
 function color(value:string):string|undefined {
@@ -19,10 +20,10 @@ function color(value:string):string|undefined {
 export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
   let paragraphs:Array<Paragraph|Table>=[];
   const numbering:Array<{reference:string;levels:Array<{level:number;format:typeof LevelFormat[keyof typeof LevelFormat];text:string;alignment:typeof AlignmentType.LEFT;style:{paragraph:{indent:{left:number;hanging:number}}}}> }>=[];
-  const listReference=(ordered:boolean)=>{const reference='list-'+numbering.length;numbering.push({reference,levels:Array.from({length:9},(_,level)=>({level,format:ordered?LevelFormat.DECIMAL:LevelFormat.BULLET,text:ordered?'%'+(level+1)+'.':'•',alignment:AlignmentType.LEFT,style:{paragraph:{indent:{left:709*(level+1),hanging:360}}}}))});return reference;};
+  const listReference=(ordered:boolean)=>{const reference='list-'+numbering.length;numbering.push({reference,levels:Array.from({length:9},(_,level)=>({level,format:ordered?(level===2?LevelFormat.RUSSIAN_LOWER:LevelFormat.DECIMAL):LevelFormat.BULLET,text:ordered&&level===2?'%3)':ordered?Array.from({length:level+1},(_,i)=>'%'+(i+1)).join('.')+'.':'•',alignment:AlignmentType.LEFT,style:{paragraph:{indent:{left:709*(level+1),hanging:360}}}}))});return reference;};
   if(content.startsWith(richPrefix)) {
     const fragment=parseFragment(content.slice(richPrefix.length));let runs:TextRun[]=[];
-    const flush=(context:Context={})=>{const continuation=context.numbering&&context.listItem?.used;if(context.listItem)context.listItem.used=true;paragraphs.push(new Paragraph({children:runs,heading:context.heading,numbering:continuation?undefined:context.numbering,alignment:context.alignment??(context.heading===HeadingLevel.HEADING_1?AlignmentType.CENTER:context.heading||context.numbering||context.table?AlignmentType.LEFT:AlignmentType.JUSTIFIED),indent:context.indent||(continuation?{left:709*(context.numbering!.level+1)}:context.heading||context.numbering||context.table||context.alignment===AlignmentType.CENTER||context.alignment===AlignmentType.RIGHT?undefined:{firstLine:709}),spacing:{before:context.heading?240:0,after:160,line:context.heading?312:360,...context.spacing}}));runs=[];};
+    const flush=(context:Context={})=>{const continuation=context.numbering&&context.listItem?.used;if(context.listItem)context.listItem.used=true;paragraphs.push(new Paragraph({children:runs,heading:context.heading,style:context.heading?undefined:context.table?'DocGridTable':DOCUMENT_STYLE[context.role??'body'],numbering:continuation?undefined:context.numbering,alignment:context.alignment,indent:context.indent||(context.numbering?{left:709*(context.numbering.level+1),hanging:continuation?0:360,firstLine:0}:context.heading||context.table||context.alignment===AlignmentType.CENTER||context.alignment===AlignmentType.RIGHT?{firstLine:0}:undefined),spacing:context.spacing}));runs=[];};
     const walk=(node:Node,inherited:Style={},depth=0,context:Context={})=>{
       if(depth>100)throw new Error('Слишком сложное оформление документа');
       if(node.nodeName==='#text'){if(depth===0&&!(node as DefaultTreeAdapterMap['textNode']).value.trim())return;runs.push(new TextRun({text:(node as DefaultTreeAdapterMap['textNode']).value,...inherited}));return;}
@@ -54,12 +55,13 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
       }
       if(['ul','ol'].includes(node.tagName)){
         if(runs.length)flush(context);
-        const reference=listReference(node.tagName==='ol'),level=Math.min(8,(context.numbering?.level??-1)+1);
-        node.childNodes.forEach(child=>walk(child,inherited,depth+1,{...context,numbering:{reference,level}}));return;
+        const reference=node.tagName==='ol'&&context.numbering?.ordered?context.numbering.reference:listReference(node.tagName==='ol'),level=Math.min(8,(context.numbering?.level??-1)+1);
+        node.childNodes.forEach(child=>walk(child,inherited,depth+1,{...context,numbering:{reference,level,ordered:node.tagName==='ol'}}));return;
       }
       const block=['p','div','li','h1','h2','h3','h4','h5','h6'].includes(node.tagName);if(block&&runs.length)flush(context);
       const heading=/^h[1-6]$/.test(node.tagName)?(['Heading1','Heading2','Heading3','Heading4','Heading5','Heading6'] as const)[Number(node.tagName[1])-1]:context.heading;
-      const next:Context={...context,heading,...(node.tagName==='li'?{listItem:{used:false}}:{})};
+      const textOf=(n:Node):string=>n.nodeName==='#text'?(n as DefaultTreeAdapterMap['textNode']).value:'childNodes' in n?n.childNodes.map(textOf).join(''):'';
+      const next:Context={...context,heading,role:documentRole(node.attrs.find(a=>a.name==='data-dg-role')?.value,textOf(node)),...(node.tagName==='li'?{listItem:{used:false}}:{})};
       if(node.tagName==='br'){runs.push(new TextRun({break:1}));return;}
       const style={...inherited};
       if(['b','strong'].includes(node.tagName))style.bold=true;
@@ -91,16 +93,15 @@ export async function renderWorkspaceDocx(content:string):Promise<Buffer> {
     fragment.childNodes.forEach(n=>walk(n));if(runs.length)flush();
   } else {
     for(const line of content.split('\n')) {
-      const heading=/^#{1,6}\s/.test(line),text=line.replace(/^#{1,6}\s+/,'');
+      const match=/^(#{1,6})\s+/.exec(line),heading=match?(['Heading1','Heading2','Heading3','Heading4','Heading5','Heading6'] as const)[match[1].length-1]:undefined,text=line.replace(/^#{1,6}\s+/,'');
       const children:TextRun[]=[];
-      for(const part of text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g))children.push(new TextRun({text:part.replace(/^\*{1,2}|\*{1,2}$/g,''),bold:heading||part.startsWith('**'),italics:part.startsWith('*')&&!part.startsWith('**')}));
-      paragraphs.push(new Paragraph({children,heading:heading?HeadingLevel.HEADING_1:undefined,indent:heading?undefined:{firstLine:709},spacing:{after:120,line:360}}));
+      for(const part of text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g))children.push(new TextRun({text:part.replace(/^\*{1,2}|\*{1,2}$/g,''),bold:!!heading||part.startsWith('**'),italics:part.startsWith('*')&&!part.startsWith('**')}));
+      paragraphs.push(new Paragraph({children,heading,style:heading?undefined:DOCUMENT_STYLE[documentRole(undefined,text)]}));
     }
   }
-  return Packer.toBuffer(new Document({numbering:{config:numbering},styles:{default:{document:{run:{font:'Times New Roman',size:28,color:'171A1D'}},heading1:{run:{font:'Times New Roman',size:36,bold:true,color:'171A1D'}},heading2:{run:{font:'Times New Roman',size:32,bold:true,color:'171A1D'}},heading3:{run:{font:'Times New Roman',size:28,bold:true,color:'171A1D'}},heading4:{run:{font:'Times New Roman',size:28,bold:true,color:'171A1D'}},heading5:{run:{font:'Times New Roman',size:28,bold:true,color:'171A1D'}},heading6:{run:{font:'Times New Roman',size:28,bold:true,color:'171A1D'}}}},sections:[{properties:{page:{margin:{top:1134,bottom:1134,left:1701,right:850}}},children:paragraphs.length?paragraphs:[new Paragraph('')]}]}));
+  return Packer.toBuffer(new Document({title:'',description:DOCX_STRUCTURE_VERSION,numbering:{config:numbering},styles:documentStructureStyles(),sections:[{properties:{page:DOCX_PAGE},children:paragraphs.length?paragraphs:[new Paragraph({style:'DocGridBody'})]}]}));
 }
 
 export function safeDownloadName(title:string) {
   return title.replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g,'_').replace(/^\.+/,'').trim().slice(0,160)||'Документ';
 }
-

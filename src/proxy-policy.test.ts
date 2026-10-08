@@ -114,3 +114,11 @@ test("document check routes accept a single bounded revision and reject unrelate
  assert.equal(isAllowedDocGridRequest('POST',path,new URLSearchParams('revision=2')),false);
 });
 
+
+test("canonical DOCX files and recovery drafts are binary and reject unsafe formats", () => {
+  const P="11111111-1111-4111-8111-111111111111",B="22222222-2222-4222-8222-222222222222",D="33333333-3333-4333-8333-333333333333";
+  const path = `/api/docgrid/repositories/${P}/branches/${B}/documents/${D}/export`;
+  assert.equal(resolveDocGridRoute('GET',path,new URLSearchParams('revision=1&format=docx'))?.response,'binary');
+  assert.equal(resolveDocGridRoute('GET',path,new URLSearchParams('revision=1&format=html')),null);
+  assert.equal(resolveDocGridRoute('POST',`/api/docgrid/repositories/${P}/document-draft.docx`,new URLSearchParams())?.response,'binary');
+});

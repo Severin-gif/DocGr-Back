@@ -42,6 +42,7 @@ async function run(args) {
   if(process.argv.includes('--shares-only')){clearTimeout(timeout);passed=true;return;}
   await require('./office-http-acceptance.cjs')({call,prefix,jwt,base});
   await require('./document-quality-http-acceptance.cjs')({call,jwt});
+  await require('./document-structure-http-acceptance.cjs')({call,jwt,base,db});
   if(process.argv.includes('--office-only')){clearTimeout(timeout);passed=true;return;}
   const artifact=await call(prefix+'/artifacts','POST',{title:'Draft',content:'Text'},jwt('owner'),201);assert.ok(artifact.id);
   const home=await call('/api/docgrid/home');assert.ok(JSON.stringify(home).includes('Standalone test'));
@@ -59,4 +60,3 @@ async function run(args) {
   clearTimeout(timeout);passed=true;console.log('PASS standalone HTTP + real Prisma: SSO, forged headers rejected, project isolation, nested upload/download, draft, Home, agent grants, MCP, isolated schema and repeatable migrations; no Legal Core');
  }finally{await app?.close();await socket?.stop();await embedded?.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
-
