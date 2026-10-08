@@ -999,7 +999,7 @@ export class DocGridService {
         const existing = await tx.$queryRaw<any[]>`SELECT id,title,path,sha256,extraction_status AS "extractionStatus" FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND path=${normalizedPath} AND title=${title} AND deleted_at IS NULL ORDER BY created_at,id`;
         if (existing.some(row => row.sha256 !== hash)) throw new ConflictException('В папке уже есть файл с этим именем и другим содержимым');
         if (existing[0]) return {...existing[0], reused: true};
-        const total=await tx.$queryRaw<Array<{size:bigint}>>`SELECT COALESCE(sum(byte_size),0)::bigint AS size FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid`;
+        const total=await tx.$queryRaw<Array<{size:bigint}>>`SELECT ((SELECT COALESCE(sum(byte_size),0) FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid)+(SELECT COALESCE(sum(byte_size),0) FROM docgrid.dg_shared_proposals WHERE project_id=${projectId}::uuid AND status='OPEN'))::bigint AS size`;
         if(Number(total[0]?.size || 0)+file.buffer.length>DOCGRID_PROJECT_MAX_BYTES)throw new BadRequestException('В проекте доступно 500 МБ, включая корзину');
         return null;
       };

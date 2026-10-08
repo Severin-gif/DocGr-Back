@@ -187,6 +187,7 @@ def xlsx_view(z):
             row,col=index(cell.attrib.get('r',''))
             if row>=MAX_ROWS or col>=MAX_COLS or total>=MAX_CELLS: partial=True; continue
             value=next((n.text or '' for n in cell if tag(n)=='v'),'')
+            raw_value=value
             typ=cell.attrib.get('t')
             if typ=='s': value=shared[int(value)]
             elif typ=='inlineStr': value=''.join(n.text or '' for n in cell.iter() if tag(n)=='t')
@@ -204,7 +205,7 @@ def xlsx_view(z):
             formula=next((n.text or '' for n in cell if tag(n)=='f'),None)
             if formula is not None and not value: value='[нет сохранённого результата]'
             if value or formula is not None:
-                rows.setdefault(row,[]).append({'column':col,'value':value[:10000],'formula':formula[:10000] if formula is not None else None})
+                rows.setdefault(row,[]).append({'column':col,'value':value[:10000],'rawValue':raw_value[:10000] if typ in (None,'n') else value[:10000],'formula':formula[:10000] if formula is not None else None})
                 total+=1
         result.append({'name':sheet.attrib.get('name','Лист'),'rows':[{'index':r,'cells':c} for r,c in sorted(rows.items())], 'partial':partial})
     return {'kind':'spreadsheet','sheets':result,'warnings':warnings+(['Показаны первые 50 листов.'] if len(sheets)>50 else [])}

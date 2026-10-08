@@ -1,0 +1,94 @@
+const assert=require('node:assert/strict');
+const JSZip=require('jszip');
+const {renderWorkspaceDocx}=require('../dist/modules/docgrid/workspace-document-export');
+module.exports=async({call,jwt,base,db})=>{
+ const owner=jwt('owner'),guest=jwt('shared-author'),outsider=jwt('outsider');
+ const project=await call('/api/docgrid/repositories','POST',{name:'Shared folder test'},owner,201),root='/api/docgrid/repositories/'+project.id;
+ await call(root+'/folders','POST',{path:'/Case/Nested'},owner,201);await call(root+'/folders','POST',{path:'/Case2'},owner,201);
+ async function upload(title,bytes,path='/Case',token=owner,endpoint=root+'/materials',status=201){const f=new FormData();f.append('file',new Blob([bytes]),title);f.append('path',path);const r=await fetch(base+endpoint,{method:'POST',headers:token?{authorization:'Bearer '+token}:{},body:f});const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));return data;}
+ const material=await upload('proof.pdf',Buffer.from('immutable source'));
+ const hidden=await upload('private.txt',Buffer.from('private'),'/Case2');
+ const docxBytes=await renderWorkspaceDocx('<!-- docgrid-richtext-v1 --><p>100 рублей</p>');
+ const word=await upload('Договор.docx',docxBytes);
+ const doc=await call(root+'/artifacts','POST',{title:'Рабочий договор',path:'/Case',content:'<!-- docgrid-richtext-v1 --><p>Первый текст</p>'},owner,201);
+ const expiresAt=new Date(Date.now()+3600000).toISOString();
+ await call(root+'/shares','POST',{path:'/Case',mode:'PROPOSE',expiresAt},guest,404);
+ const share=await call(root+'/shares','POST',{path:'/Case',mode:'PROPOSE',expiresAt},owner,201),publicRoot='/api/docgrid/shared/'+share.token;
+ const reader=await call(root+'/shares','POST',{path:'/Case',mode:'READ',expiresAt},owner,201),readRoot='/api/docgrid/shared/'+reader.token;
+ const listing=await call(publicRoot,'GET',undefined,null);assert.equal(listing.files.length,3);assert.ok(!listing.files.some(f=>f.id===hidden.id));assert.ok(!JSON.stringify(listing).includes('token_hash'));assert.ok(!listing.projectId);
+ const source=listing.files.find(f=>f.id===material.id),working=listing.files.find(f=>f.id===doc.id),wordEntry=listing.files.find(f=>f.id===word.id);
+ await call(publicRoot+'/files/material/'+hidden.id+'/content','GET',undefined,null,404);
+ await call(publicRoot+'/files/material/'+hidden.id+'/download','GET',undefined,null,404);
+ const payload={kind:'MOVE',fileKind:'material',id:source.id,baseHash:source.baseHash,path:'/Case/Nested',title:'Move source'};
+ await call(publicRoot+'/proposals','POST',payload,null,401);
+ await call(readRoot+'/proposals','POST',payload,guest,404);
+ await call(publicRoot+'/proposals','POST',{...payload,path:'/Case2'},guest,400);
+ await call(publicRoot+'/proposals','POST',{kind:'EDIT',fileKind:'material',id:source.id,baseHash:source.baseHash,title:'Edit PDF',content:'changed'},guest,400);
+ const move=await call(publicRoot+'/proposals','POST',payload,guest,201);
+ assert.equal((await call(root+'/files')).materials.find(f=>f.id===material.id).path,'/Case');
+ await call(root+'/shared-proposals','GET',undefined,guest,404);
+ await call(root+'/shared-proposals/'+move.id+'/decide','POST',{action:'MERGE'},guest,404);
+ await call(root+'/members','PUT',{email:'shared-author@example.test',role:'READER'},owner);
+ await call(root+'/shared-proposals/'+move.id+'/decide','POST',{action:'MERGE'},guest,404);
+ await call(root+'/shared-proposals/'+move.id+'/decide','POST',{action:'MERGE'},owner,201);
+ const read=await fetch(base+publicRoot+'/files/material/'+material.id+'/download');assert.equal(read.status,200);assert.equal(await read.text(),'immutable source');
+ assert.equal((await call(root+'/files')).materials.find(f=>f.id===material.id).path,'/Case/Nested');
+ await call(root+'/shared-proposals/'+move.id+'/decide','POST',{action:'MERGE'},owner,409);
+ // Revoked and expired links stop reads, downloads, submissions and merge.
+ const revoke=await call(root+'/shares','POST',{path:'/Case',mode:'PROPOSE',expiresAt},owner,201);
+ const revRoot='/api/docgrid/shared/'+revoke.token;
+ const revPr=await call(revRoot+'/proposals','POST',{kind:'MOVE',fileKind:'document',id:working.id,baseHash:working.baseHash,path:'/Case/Nested',title:'Revoked PR'},guest,201);
+ await call(root+'/shares/'+revoke.id+'/revoke','POST',{},owner,201);
+ await call(revRoot,'GET',undefined,null,404);await call(revRoot+'/files/document/'+doc.id+'/download','GET',undefined,null,404);
+ await call(revRoot+'/proposals','POST',payload,guest,404);
+ await call(root+'/shared-proposals/'+revPr.id+'/decide','POST',{action:'MERGE'},owner,409);
+ await call(root+'/shared-proposals/'+revPr.id+'/decide','POST',{action:'CLOSE'},owner,201);
+ await db.$executeRaw`UPDATE docgrid.dg_folder_shares SET expires_at=now()-interval '1 second' WHERE id=${reader.id}::uuid`;
+ await call(readRoot,'GET',undefined,null,404);
+ // Main revisions remain untouched until acceptance. Stale PR never overwrites newer work.
+ const edit={kind:'EDIT',fileKind:'document',id:doc.id,baseHash:working.baseHash,title:'Edit working DOCX',content:'<!-- docgrid-richtext-v1 --><p>Новый текст</p>'};
+ const a=await call(publicRoot+'/proposals','POST',edit,guest,201),b=await call(publicRoot+'/proposals','POST',{...edit,title:'Concurrent'},guest,201);
+ assert.match((await call(publicRoot+'/files/document/'+doc.id+'/content','GET',undefined,null)).view.content,/Первый текст/);
+ await call(root+'/shared-proposals/'+a.id+'/decide','POST',{action:'MERGE'},owner,201);
+ await call(root+'/shared-proposals/'+b.id+'/decide','POST',{action:'MERGE'},owner,409);
+ assert.match((await call(publicRoot+'/files/document/'+doc.id+'/content','GET',undefined,null)).view.content,/Новый текст/);
+ const office=await call(publicRoot+'/files/material/'+word.id+'/content','GET',undefined,null);
+ const wordPr=await call(publicRoot+'/proposals','POST',{kind:'EDIT',fileKind:'material',id:word.id,baseHash:office.baseHash,title:'Office copy',content:'<!-- docgrid-richtext-v1 --><p>200 рублей</p>'},guest,201);
+ assert.equal((await call(root+'/files')).materials.filter(m=>/редакция/.test(m.title)).length,0);
+ const wordResult=await call(root+'/shared-proposals/'+wordPr.id+'/decide','POST',{action:'MERGE'},owner,201);
+ const original=await fetch(base+publicRoot+'/files/material/'+word.id+'/download');assert.deepEqual(Buffer.from(await original.arrayBuffer()),docxBytes);
+ const amended=await call(root+'/materials/'+wordResult.resultId+'/office-view');assert.match(amended.html,/200 рублей/);
+ // New file is staged, not visible until merged; stranger cannot see candidate/other authors' PRs.
+ const add=await upload('New.txt',Buffer.from('New evidence'),'/Case',guest,publicRoot+'/uploads');
+ assert.ok(!(await call(publicRoot,'GET',undefined,null)).files.some(f=>f.title==='New.txt'));
+ await call(root+'/shared-proposals/'+add.id+'/download','GET',undefined,outsider,404);
+ assert.equal((await call(publicRoot+'/proposals','GET',undefined,outsider)).length,0);
+ const accepted=await call(root+'/shared-proposals/'+add.id+'/decide','POST',{action:'MERGE'},owner,201);assert.ok(accepted.resultId);
+ assert.ok((await call(publicRoot,'GET',undefined,null)).files.some(f=>f.title==='New.txt'));
+ // XLSX patch retains styles, extra package parts and formula text; clears formula cache.
+ const zip=new JSZip();
+ zip.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>');
+ zip.file('xl/workbook.xml','<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Расчёт" sheetId="1" r:id="rId1"/></sheets></workbook>');
+ zip.file('xl/_rels/workbook.xml.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/></Relationships>');
+ zip.file('xl/styles.xml','<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf numFmtId="2"/></cellXfs></styleSheet>');
+ zip.file('xl/worksheets/sheet1.xml','<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x14ac"><sheetData><row r="1"><c r="A1" s="0"><v>100</v></c><c r="B1"><f>A1*2</f><v>200</v></c></row></sheetData></worksheet>');
+ zip.file('customXml/item1.xml','<retained/>');
+ const xlsxBytes=await zip.generateAsync({type:'nodebuffer'}),sheet=await upload('Расчёт.xlsx',xlsxBytes);
+ const sheetView=await call(publicRoot+'/files/material/'+sheet.id+'/content','GET',undefined,null);assert.equal(sheetView.view.kind,'spreadsheet');assert.equal(sheetView.view.sheets[0].rows[0].cells[0].rawValue,'100');
+ const cells=[{sheet:'Расчёт',row:0,column:0,value:'150'},{sheet:'Расчёт',row:2,column:2,value:'=A1*3'}];
+ const xlPr=await call(publicRoot+'/proposals','POST',{kind:'EDIT',fileKind:'material',id:sheet.id,baseHash:sheetView.baseHash,title:'Cell changes',cells},guest,201);
+ const xlMerged=await call(root+'/shared-proposals/'+xlPr.id+'/decide','POST',{action:'MERGE'},owner,201);
+ const generated=await fetch(base+root+'/materials/'+xlMerged.resultId+'/download',{headers:{authorization:'Bearer '+owner}});const resultZip=await JSZip.loadAsync(Buffer.from(await generated.arrayBuffer()));
+ assert.equal(await resultZip.file('customXml/item1.xml').async('string'),'<retained/>');
+ const xml=await resultZip.file('xl/worksheets/sheet1.xml').async('string');assert.match(xml,/x14ac/);assert.match(xml,/s="0"/);assert.match(xml,/<v>150<\/v>/);assert.match(xml,/<f>A1\*2<\/f>/);assert.doesNotMatch(xml,/<v>200<\/v>/);assert.match(xml,/<f>A1\*3<\/f>/);
+ const unchanged=await fetch(base+publicRoot+'/files/material/'+sheet.id+'/download');assert.deepEqual(Buffer.from(await unchanged.arrayBuffer()),xlsxBytes);
+ const owners=await call(root+'/shared-proposals');assert.ok(owners.some(p=>p.payload.changes?.[0]?.before==='100.00'));
+ const materialCount=(await call(root+'/files')).materials.length;
+ const secondAdd=await upload('New.txt',Buffer.from('conflicting bytes'),'/Case',guest,publicRoot+'/uploads');
+ await call(root+'/shared-proposals/'+secondAdd.id+'/decide','POST',{action:'MERGE'},owner,409);
+ assert.equal((await call(root+'/files')).materials.length,materialCount);
+ // Remove this disposable project so its deliberately malformed PDF cannot
+ // consume the OCR worker ticks in the following independent acceptance suite.
+ await call(root,'DELETE',undefined,owner);
+ console.log('PASS shared folders: anonymous scoped reads, auth-only proposals, READ restriction, revocation/expiry, owner acceptance, atomic moves, stale edits, immutable originals, staged additions, XLSX cells/styles/formulas, collision rollback');
+};

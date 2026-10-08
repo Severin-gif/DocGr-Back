@@ -38,6 +38,8 @@ async function run(args) {
   const upload=await fetch(base+prefix+'/materials',{method:'POST',headers:{authorization:'Bearer '+jwt('owner')},body:form});const material=await upload.json();assert.equal(upload.status,201,JSON.stringify(material));
   const download=await fetch(base+prefix+'/materials/'+material.id+'/download',{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(download.status,200);assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
   await call(prefix+'/materials/'+material.id+'/download','GET',undefined,jwt('stranger'),404);
+  await require('./folder-share-acceptance.cjs')({call,jwt,base,db});
+  if(process.argv.includes('--shares-only')){clearTimeout(timeout);passed=true;return;}
   await require('./office-http-acceptance.cjs')({call,prefix,jwt,base});
   await require('./document-quality-http-acceptance.cjs')({call,jwt});
   if(process.argv.includes('--office-only')){clearTimeout(timeout);passed=true;return;}

@@ -42,6 +42,7 @@ const { DocGridService } = require(
   await pg.exec(fs.readFileSync("prisma/migrations/20260924220000_docgrid_material_storage/migration.sql", "utf8"));
   for (const name of ['20260921100000_add_document_workflow','20260924110000_astra_workflow','20260924111000_astra_sources']) await pg.exec(fs.readFileSync(`prisma/migrations/${name}/migration.sql`,'utf8'));
   await pg.exec("ALTER TABLE docgrid.docgrid_materials ADD COLUMN extraction_reason text");
+  await pg.exec(fs.readFileSync("prisma/migrations/20261008100000_shared_folders/migration.sql", "utf8"));
   function adapter(client) {
     const query = async (strings, ...values) =>
       client.query(
