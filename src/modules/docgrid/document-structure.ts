@@ -15,7 +15,7 @@ export const DOCUMENT_STYLE: Record<DocumentRole, string> = {
 export function documentRole(value: string | undefined, text: string): DocumentRole {
   if (DOCUMENT_ROLES.includes(value as DocumentRole)) return value as DocumentRole;
   // Existing labels remain literal: no renumbering and no changes to references.
-  if (/^\s*\d+(?:\.\d+)+[.)]?\s/.test(text)) return 'point';
+  if (/^\s*(?:\d+[.)]|\d+(?:\.\d+)+[.)]?)\s/.test(text)) return 'point';
   if (/^\s*[а-яёa-z][.)]\s/i.test(text)) return 'subpoint';
   return 'body';
 }
