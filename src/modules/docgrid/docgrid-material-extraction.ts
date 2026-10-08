@@ -18,10 +18,10 @@ const unread = (reason: string): MaterialExtraction => ({ text: '', status: 'UNR
 /** Separate process: timeout also stops a parser that blocks its own event loop.
  * Linux address-space/CPU limits protect the API, not only the JavaScript heap.
  * Kept separate for real subprocess failure/timeout regression tests. */
-export function runLimitedExtraction(command: string, args: string[], timeout = 8_000): Promise<string> {
+export function runLimitedExtraction(command: string, args: string[], timeout = 8_000, maxBuffer = 1024 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('prlimit', ['--as=268435456', '--cpu=6', '--core=0', '--', command, ...args], {
-      timeout, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024,
+      timeout, killSignal: 'SIGKILL', maxBuffer,
       encoding: 'utf8', windowsHide: true,
     }, (error, stdout) => error ? reject(error) : resolve(stdout));
   });
