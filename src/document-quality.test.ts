@@ -31,6 +31,46 @@ test('explicit equations support cents, negative values and large exact integers
  assert.equal(checkDocument(rich('<p>-0,10 + 0,20 = 0,10</p>'),1).errors,0);
  assert.equal(checkDocument(rich('<p>9007199254740991 + 1 = 9007199254740993</p>'),1).errors,1);
 });
+test('money equations share full currency spellings and preserve exact error anchors',()=>{
+ for(const [expression,total,expected] of [
+  ['10 рублей + 20 рублей = 40 рублей','40 рублей','30,00'],
+  ['Расчёт: 10 рублей + 20 рублей = 40 рублей.','40 рублей','30,00'],
+  ['1 рубль + 2 рубля = 4 рубля','4 рубля','3,00'],
+  ['10 РУБЛЕЙ + 20 РУБЛЕЙ = 40 РУБЛЕЙ','40 РУБЛЕЙ','30,00'],
+  ['1\u00a0000,10 рублей + 2\u202f000,20 рублей = 3 000,31 рублей','3 000,31 рублей','3 000,30'],
+  ['-0,10 рубля + 0,20 рубля = 0,11 рубля','0,11 рубля','0,10'],
+  ['10 долларов + 20 долларов = 40 долларов','40 долларов','30,00'],
+  ['10 евро + 20 евро = 40 евро','40 евро','30,00'],
+ ]){
+  for(const source of [expression,rich('<p>'+expression+'</p>')]){
+   const result=checkDocument(source,8);
+   assert.equal(result.errors,1,expression);assert.equal(result.warnings,0,expression);
+   const issue=result.issues[0];assert.equal(issue.rule,'equation_total');assert.equal(issue.anchor.quote,total);
+   assert.equal(issue.anchor.start,expression.indexOf(total));assert.equal(issue.anchor.end,expression.indexOf(total)+total.length);
+   assert.ok(issue.explanation.includes('Сумма слева: '+expected));
+   assert.equal(result.contentHash,contentHash(source));assert.equal(result.revision,8);
+  }
+ }
+ for(const expression of ['10 рублей + 20 рублей = 30 рублей','1 рубль + 2 рубля = 3 рубля','10 руб. + 20 ₽ = 30 рублей','0,10 рублей + 0,20 рублей = 0,30 рублей']){
+  assert.equal(checkDocument(expression,1).issues.length,0,expression);
+ }
+ const mixed=checkDocument('10 рублей + 20 USD = 30 рублей',1);
+ assert.equal(mixed.errors,0);assert.equal(mixed.warnings,1);assert.equal(mixed.issues[0].rule,'mixed_units');
+ const multiple=checkDocument(rich('<p>10 рублей + 20 рублей = 40 рублей</p><p>1 рубль + 2 рубля = 4 рубля</p>'),1);
+ assert.equal(multiple.errors,2);
+});
+test('negative durations cover grammatical day forms in plain and rich documents',()=>{
+ for(const expression of ['срок: -1 день','в течение -2 дня','в течение -5 дней','срок оплаты — -21 календарных день','в течение -2 рабочих дня']){
+  for(const source of [expression,rich('<p>'+expression+'</p>')]){
+   const result=checkDocument(source,1);assert.equal(result.errors,1,expression);assert.equal(result.warnings,0);
+   assert.equal(result.issues[0].rule,'negative_duration');assert.equal(result.issues[0].anchor.quote,expression);
+   assert.equal(result.issues[0].anchor.start,0);assert.equal(result.issues[0].anchor.end,expression.length);
+  }
+ }
+ for(const expression of ['срок: 1 день','в течение 2 дня после подписания','в течение 5 дней после подписания','срок: -1 деньгами']){
+  assert.equal(checkDocument(expression,1).errors,0,expression);
+ }
+});
 test('calendar validity, explicit ranges and ambiguous legal triggers',()=>{
  const result=checkDocument(rich('<p>Дата 31.02.2026</p><p>с 10.05.2026 по 01.05.2026</p><p>в течение 5 дней</p><p>в течение 5 дней после подписания</p><p>в течение -3 дней</p>'),1);
  assert.equal(result.errors,3);assert.equal(result.warnings,1);assert.ok(result.issues.every(i=>i.anchor.blockId.startsWith('b-')));

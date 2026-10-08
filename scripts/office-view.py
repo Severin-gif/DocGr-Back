@@ -1,6 +1,7 @@
 """Bounded, offline office view. Never evaluates formulas or follows external links."""
 import sys, json, zipfile, re, html, datetime
 import xml.etree.ElementTree as ET
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 
 MAX_ROWS, MAX_COLS, MAX_CELLS = 2000, 100, 20000
 NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
@@ -125,10 +126,55 @@ def docx_view(z):
     if len(content)>800000: raise ValueError('Document size limit')
     return {'kind':'docx','html':content,'warnings':sorted(warnings)}
 
+BUILTIN_NUMBER_FORMATS = {0:'General', 1:'0', 2:'0.00', 3:'#,##0', 4:'#,##0.00', 9:'0%', 10:'0.00%', 49:'@'}
+RAW_NUMBER_WARNING = 'Неподдерживаемые числовые форматы Excel отмечены в ячейках: показано исходное значение, а не отображение Excel.'
+
+def format_number(value, code):
+    """Render a conservative subset; never silently ignore an unknown format."""
+    if code in ('General', '@'): return value
+    if code is None or len(code)>200: return None
+    # Quoted/escaped literals (including currency symbols) stay literal: "0%"
+    # must not be mistaken for numeric placeholders or percentage scaling.
+    tokens=re.findall(r'"[^"]*"|\\.|.', code)
+    literal=lambda t: t[1:-1] if t.startswith('"') else t[1:] if t.startswith('\\') else t
+    numeric=[i for i,t in enumerate(tokens) if t in ('0','#')]
+    if not numeric: return None
+    start,end=numeric[0],numeric[-1]+1
+    mask=''.join(tokens[start:end])
+    if not re.fullmatch(r'(?:0+|#,##0)(?:\.0{1,10})?', mask): return None
+    edges=tokens[:start]+tokens[end:]
+    if any(not (t.startswith(('"','\\')) or t in (' ', '%', '$', '€', '₽', '+', '-')) for t in edges): return None
+    # A single active percent suffix is supported; quoted/escaped % is literal.
+    percent=edges.count('%')
+    if percent>1: return None
+    try:
+        n=Decimal(value)
+        if not n.is_finite() or abs(n.adjusted())>300: return None
+        decimals=len(mask.split('.')[1]) if '.' in mask else 0
+        with localcontext() as ctx:
+            ctx.prec=340
+            if percent: n*=100
+            n=n.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+            if not n: n=abs(n)
+            rendered=format(abs(n), (',' if ',' in mask else '')+'.'+str(decimals)+'f')
+        if ',' not in mask:
+            integer,dot,fraction=rendered.partition('.')
+            rendered=integer.zfill(len(mask.split('.')[0]))+dot+fraction
+        return ('-' if n<0 else '')+''.join(map(literal,tokens[:start]))+rendered+''.join(map(literal,tokens[end:]))
+    except (InvalidOperation, ValueError): return None
+
 def xlsx_view(z):
     names=z.namelist()
     shared=[''.join(n.text or '' for n in s.iter() if tag(n)=='t') for s in read_xml(z,'xl/sharedStrings.xml')] if 'xl/sharedStrings.xml' in names else []
     rels={x.attrib['Id']:x.attrib['Target'] for x in read_xml(z,'xl/_rels/workbook.xml.rels') if x.attrib.get('TargetMode')!='External'}
+    formats=dict(BUILTIN_NUMBER_FORMATS); styles=[0]
+    if 'xl/styles.xml' in names:
+        style_root=read_xml(z,'xl/styles.xml')
+        for n in style_root:
+            if tag(n)=='numFmts':
+                for fmt in n: formats[int(fmt.attrib['numFmtId'])]=fmt.attrib.get('formatCode')
+            elif tag(n)=='cellXfs': styles=[int(x.attrib.get('numFmtId','0')) for x in n]
+    warnings=['Показаны сохранённые значения. Формулы не пересчитываются.']
     result=[]
     sheets=[s for s in read_xml(z,'xl/workbook.xml').iter() if tag(s)=='sheet']
     for sheet in sheets[:50]:
@@ -145,13 +191,23 @@ def xlsx_view(z):
             if typ=='s': value=shared[int(value)]
             elif typ=='inlineStr': value=''.join(n.text or '' for n in cell.iter() if tag(n)=='t')
             elif typ=='b': value='TRUE' if value=='1' else 'FALSE'
+            elif typ in (None,'n') and value:
+                style=cell.attrib.get('s','0')
+                fmt_id=styles[int(style)] if style.isdigit() and int(style)<len(styles) else None
+                code=formats.get(fmt_id)
+                displayed=format_number(value,code)
+                if displayed is None:
+                    label=code if code is not None else 'numFmtId='+str(fmt_id)
+                    value='[исходное значение; формат Excel: '+label[:200]+'] '+value
+                    if RAW_NUMBER_WARNING not in warnings: warnings.append(RAW_NUMBER_WARNING)
+                else: value=displayed
             formula=next((n.text or '' for n in cell if tag(n)=='f'),None)
             if formula is not None and not value: value='[нет сохранённого результата]'
             if value or formula is not None:
                 rows.setdefault(row,[]).append({'column':col,'value':value[:10000],'formula':formula[:10000] if formula is not None else None})
                 total+=1
         result.append({'name':sheet.attrib.get('name','Лист'),'rows':[{'index':r,'cells':c} for r,c in sorted(rows.items())], 'partial':partial})
-    return {'kind':'spreadsheet','sheets':result,'warnings':['Показаны сохранённые значения. Формулы не пересчитываются. Даты могут отображаться числовыми значениями Excel.']+(['Показаны первые 50 листов.'] if len(sheets)>50 else [])}
+    return {'kind':'spreadsheet','sheets':result,'warnings':warnings+(['Показаны первые 50 листов.'] if len(sheets)>50 else [])}
 
 def xls_view(path):
     import xlrd
