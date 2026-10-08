@@ -5,13 +5,14 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { DocGridMaterialStorageService,readMaterialBytes } from './docgrid-material-storage.service';
 import { digest,folderPath,inFolder,parsed,shareInput,proposalInput } from './folder-share.protocol';
 import { normalizeDocumentContent,RICH_PREFIX } from './document-quality';
+import { DOCX_STRUCTURE_VERSION } from './document-structure';
 import { renderWorkspaceDocx } from './workspace-document-export';
 import { extractMaterialText } from './docgrid-material-extraction';
 import { officeView } from './office-view';
 import { editSpreadsheet } from './office-edit';
 type Db=Prisma.TransactionClient;
 type Share={id:string;project_id:string;path:string;mode:string;name:string;expires_at:Date;revoked_at:Date|null};
-type Entry={id:string;title:string;path:string;content?:string;revision?:number;head?:string;branch?:string;sha256?:string;mime?:string;bytes?:Uint8Array;storage_key?:string;byte_size?:number};
+type Entry={id:string;title:string;path:string;content?:string;revision?:number;head?:string;branch?:string;sha256?:string;mime?:string;bytes?:Uint8Array;storage_key?:string;byte_size?:number;docx_bytes?:Uint8Array;docx_sha256?:string};
 const MAX_BYTES=32*1024*1024,PROJECT_BYTES=500*1024*1024;
 @Injectable()
 export class FolderShareService {
@@ -28,7 +29,7 @@ export class FolderShareService {
  private async entry(tx:Db,share:Share,kind:string,id:string):Promise<Entry>{
   const rows=kind==='material'
    ?await tx.$queryRaw<Entry[]>`SELECT id,title,path,sha256,mime,bytes,storage_key,byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${share.project_id}::uuid AND deleted_at IS NULL`
-   :await tx.$queryRaw<Entry[]>`SELECT d.id,d.title,d.path,b.content,b.revision,b.head_commit_id AS head,b.branch_id AS branch FROM docgrid.workspace_documents d JOIN docgrid.docgrid_branch_documents b ON b.document_id=d.id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE d.id=${id}::uuid AND d.project_id=${share.project_id}::uuid AND br.project_id=d.project_id AND br.name='main' AND d.docgrid_deleted_at IS NULL`;
+   :await tx.$queryRaw<Entry[]>`SELECT d.id,d.title,d.path,b.content,b.revision,b.head_commit_id AS head,b.branch_id AS branch,b.docx_bytes,b.docx_sha256 FROM docgrid.workspace_documents d JOIN docgrid.docgrid_branch_documents b ON b.document_id=d.id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE d.id=${id}::uuid AND d.project_id=${share.project_id}::uuid AND br.project_id=d.project_id AND br.name='main' AND d.docgrid_deleted_at IS NULL`;
   if(!rows[0]||!inFolder(rows[0].path,share.path))throw new NotFoundException('Файл недоступен');
   // Project locks serialize all proposal merges and existing DocGrid writes.
   return rows[0];
@@ -70,7 +71,8 @@ export class FolderShareService {
  });}
  async read(token:string,kind:string,id:string){
   const row=await this.db.$transaction(async tx=>this.entry(tx,await this.share(tx,token),kind,id));
-  const bytes=kind==='material'?await readMaterialBytes(row as any,this.storage):await renderWorkspaceDocx(row.content!);
+  const bytes=kind==='material'?await readMaterialBytes(row as any,this.storage):row.docx_bytes?Buffer.from(row.docx_bytes):await renderWorkspaceDocx(row.content!);
+  if(kind==='document'&&row.docx_sha256&&createHash('sha256').update(bytes).digest('hex')!==row.docx_sha256)throw new ConflictException('Контрольная сумма DOCX не совпадает');
   await this.db.$transaction(async tx=>this.entry(tx,await this.share(tx,token),kind,id));
   return {bytes,title:kind==='material'?row.title:row.title.replace(/\.docx$/i,'')+'.docx'};
  }
@@ -95,6 +97,7 @@ export class FolderShareService {
    if(dto.fileKind==='document'){
     if(dto.content===undefined||dto.cells)throw new BadRequestException('Нужен текст редакции DOCX');
     content=normalizeDocumentContent(dto.content);
+    bytes=await renderWorkspaceDocx(content);mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document';
    }else if(/\.docx$/i.test(row.title)){
     if(dto.content===undefined||dto.cells||!dto.content.startsWith(RICH_PREFIX))throw new BadRequestException('Нужна редакция DOCX');
     const view=await officeView(row.title,await readMaterialBytes(row as any,this.storage)) as any;
@@ -189,6 +192,9 @@ export class FolderShareService {
    const content=p.content,next=row!.revision!+1,commitId=randomUUID();
    await tx.$executeRaw`INSERT INTO docgrid.docgrid_commits(id,project_id,branch_id,document_id,parent_commit_id,author_id,message,before_content,after_content,content_hash) VALUES(${commitId}::uuid,${project}::uuid,${row!.branch}::uuid,${p.id}::uuid,${row!.head}::uuid,${pr.author_id},${pr.title},${row!.content},${content},${digest([row!.branch,p.id,String(next),pr.title,content].join('\0'))})`;
    await tx.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET content=${content},revision=${next},head_commit_id=${commitId}::uuid,workspace_version=workspace_version+1,updated_at=CURRENT_TIMESTAMP WHERE branch_id=${row!.branch}::uuid AND document_id=${p.id}::uuid`;
+   const bytes=pr.bytes?Buffer.from(pr.bytes):await renderWorkspaceDocx(content),hash=createHash('sha256').update(bytes).digest('hex');
+   await tx.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${hash},format_version=${DOCX_STRUCTURE_VERSION} WHERE branch_id=${row!.branch}::uuid AND document_id=${p.id}::uuid`;
+   await tx.$executeRaw`UPDATE docgrid.docgrid_commits SET docx_bytes=${bytes},docx_sha256=${hash},format_version=${DOCX_STRUCTURE_VERSION} WHERE id=${commitId}::uuid`;
    const [doc]=await tx.$queryRaw<any[]>`UPDATE docgrid.workspace_documents SET content=${content},version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=${p.id}::uuid RETURNING version`;
    await tx.$executeRaw`INSERT INTO docgrid.workspace_document_versions(document_id,version,content,author_id,message) VALUES(${p.id}::uuid,${doc.version},${content},${pr.author_id},${pr.title})`;
   }else{

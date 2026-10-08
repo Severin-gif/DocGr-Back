@@ -36,6 +36,8 @@ const rules: Rule[] = [
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/artifacts$`) },
 
   { method: "GET", pattern: new RegExp(`^/api/docgrid/branches/${UUID}/documents/${UUID}/checks$`), query: new Set(["revision"]) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/document-draft\\.docx$`), response: "binary" },
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/branches/${UUID}/documents/${UUID}/export$`), response: "binary", query: new Set(["revision", "format"]) },
   // Файловое дерево, папки и исходные материалы (workspace v2)
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/materials/${UUID}/office-view$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/files$`), query: new Set(["trash"]) },
@@ -83,6 +85,7 @@ export function resolveDocGridRoute(method: string, pathname: string, searchPara
     if (key === "cursor" && !new RegExp(`^${UUID}$`).test(value)) return null;
     if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) return null;
     if (key === "revision" && (!/^[1-9]\d{0,8}$/.test(value))) return null;
+    if (key === "format" && value !== "docx" && value !== "pdf") return null;
     if (key === "trash" && value !== "true" && value !== "false") return null;
   }
   return { body: rule.body ?? "json", response: rule.response ?? "json", query: rule.query };
@@ -104,4 +107,3 @@ export function buildUpstreamUrl(base: string, originalUrl: string): URL {
   if (!relative.pathname.startsWith("/api/docgrid/")) throw new Error("Route is outside DocGrid API");
   return new URL(relative.pathname + relative.search, base.replace(/\/+$/, "") + "/");
 }
-

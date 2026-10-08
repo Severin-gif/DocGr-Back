@@ -15,7 +15,7 @@ module.exports=async({call,jwt,base})=>{
  assert.equal((await call(root+'/packages')).length,1);
  const get=async(path,status=200)=>{const r=await fetch(base+root+path,{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(r.status,status,await (r.status!==status?r.text():Promise.resolve('')));return r;};
  const exported=await get('/branches/'+branch.id+'/documents/'+document.id+'/export?revision=1&format=docx');
- const exportedZip=await JSZip.loadAsync(await exported.arrayBuffer()),xml=await exportedZip.file('word/document.xml').async('string');
+ const exportedBytes=Buffer.from(await exported.arrayBuffer());const exportedZip=await JSZip.loadAsync(exportedBytes),xml=await exportedZip.file('word/document.xml').async('string');
  for(const pattern of [/w:b\b/,/w:i\b/,/w:u\b/,/123456/,/FFF59D/i])assert.match(xml,pattern);assert.doesNotMatch(xml,/bad\(\)/);
  const pdf=await get('/branches/'+branch.id+'/documents/'+document.id+'/export?revision=1&format=pdf');assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0,5).toString(),'%PDF-');
  await call('/api/docgrid/branches/'+branch.id+'/documents/'+document.id,'PUT',{content:'Изменённый документ',revision:1,message:'Новая редакция'});
@@ -25,7 +25,7 @@ module.exports=async({call,jwt,base})=>{
  await call(root+'/files/'+material.id+'/trash','POST',{kind:'material',action:'trash'},jwt('owner'),201);
  const archive=await get('/packages/'+bundle.id+'/download'),zip=await JSZip.loadAsync(await archive.arrayBuffer());
  const manifest=JSON.parse(await zip.file('manifest.json').async('string'));assert.equal(manifest.files.length,2);assert.ok(manifest.files.every(f=>!f.name.includes('/')&&!f.name.includes('..')));
- const frozen=await JSZip.loadAsync(await zip.file(manifest.files[0].name).async('nodebuffer'));assert.match(await frozen.file('word/document.xml').async('string'),/Основной документ/);
+ const frozenBytes=await zip.file(manifest.files[0].name).async('nodebuffer');assert.deepEqual(frozenBytes,exportedBytes);const frozen=await JSZip.loadAsync(frozenBytes);assert.match(await frozen.file('word/document.xml').async('string'),/Основной документ/);
  assert.equal(await zip.file(manifest.files[1].name).async('string'),'Оригинал приложения');assert.ok(zip.file('000_Опись.docx'));
  await call(root+'/files/'+material.id+'/trash','POST',{kind:'material',action:'restore'},jwt('owner'),201);
  const second=await call(root+'/packages','POST',{...draft,previousId:bundle.id,items:[{...item,revision:2},attachment]},jwt('owner'),201);assert.equal(second.version,2);assert.equal(second.groupId,bundle.groupId);

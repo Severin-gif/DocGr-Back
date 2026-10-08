@@ -1,3 +1,5 @@
+import { renderWorkspaceDocx } from './workspace-document-export';
+import { DOCX_STRUCTURE_VERSION } from './document-structure';
 import { AiTimeBudgetService } from './ai-time-budget.service';
 import { checkDocument, normalizeDocumentContent } from './document-quality';
 import { officeView } from './office-view';
@@ -35,6 +37,8 @@ type BranchDocumentRow = {
   path: string;
   revision: number;
   content: string;
+  fileFormat?: 'docx' | null;
+  formatVersion?: string | null;
   headCommitId: string | null;
   workspaceVersion: number | null;
   updatedAt: Date;
@@ -95,6 +99,13 @@ export class DocGridService {
               CASE WHEN ${entityId}::text IS NULL THEN NULL ELSE ${entityId}::uuid END,
               ${JSON.stringify(metadata)}::jsonb)
     `;
+  }
+
+  private async persistDocx(db: Db, branchId: string, documentId: string, commitId: string | null, content: string) {
+    const bytes = await renderWorkspaceDocx(content);
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${DOCX_STRUCTURE_VERSION} WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
+    if (commitId) await db.$executeRaw`UPDATE docgrid.docgrid_commits SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${DOCX_STRUCTURE_VERSION} WHERE id=${commitId}::uuid AND docx_bytes IS NULL`;
   }
 
   private async ensureMainBranch(db: Db, ownerId: string, projectId: string): Promise<BranchRow> {
@@ -172,6 +183,11 @@ export class DocGridService {
     });
   }
 
+  async draftDocx(ownerId: string, projectId: string, content: string) {
+    await this.requireRepo(this.prisma, ownerId, projectId, 'write');
+    return renderWorkspaceDocx(normalizeDocumentContent(content));
+  }
+
   async createArtifact(ownerId: string, projectId: string, dto: CreateDocGridArtifactDto) {
     return this.prisma.$transaction(async tx => {
       await this.requireRepo(tx, ownerId, projectId, 'write');
@@ -216,6 +232,7 @@ export class DocGridService {
         INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version)
         VALUES (${main.id}::uuid, ${document.id}::uuid, 1, ${content}, ${commits[0].id}::uuid, 1)
       `;
+      await this.persistDocx(tx, main.id, document.id, commits[0].id, content);
       await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at=CURRENT_TIMESTAMP WHERE id=${main.id}::uuid`;
       await tx.$executeRaw`UPDATE docgrid.workspace_projects SET updated_at=CURRENT_TIMESTAMP WHERE id=${projectId}::uuid`;
       await this.event(tx, projectId, ownerId, 'artifact.created', 'document', document.id, {
@@ -224,8 +241,8 @@ export class DocGridService {
         commitId: commits[0].id,
         hash,
       });
-      return { ...document, branchId: main.id, revision: 1, commit: commits[0], checks:checkDocument(content,1) };
-    });
+      return { ...document, fileFormat: 'docx', formatVersion: DOCX_STRUCTURE_VERSION, branchId: main.id, revision: 1, commit: commits[0], checks:checkDocument(content,1) };
+    }, { timeout: 30000 });
   }
 
   async listRepositories(ownerId: string) {
@@ -297,8 +314,8 @@ export class DocGridService {
       });
       const branch = rows[0];
       await tx.$executeRaw`
-        INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version, base_content, base_branch_id)
-        SELECT ${branch.id}::uuid, document_id, revision, content, head_commit_id, workspace_version, content, ${source.id}::uuid
+        INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version, base_content, base_branch_id, docx_bytes, docx_sha256, format_version)
+        SELECT ${branch.id}::uuid, document_id, revision, content, head_commit_id, workspace_version, content, ${source.id}::uuid, docx_bytes, docx_sha256, format_version
         FROM docgrid.docgrid_branch_documents
         WHERE branch_id = ${source.id}::uuid
       `;
@@ -313,7 +330,7 @@ export class DocGridService {
       if (branch.name === 'main') await this.ensureMainBranch(tx, ownerId, branch.projectId);
       return tx.$queryRaw<BranchDocumentRow[]>`
         SELECT bd.branch_id AS "branchId", bd.document_id AS "documentId", d.title, d.path,
-               bd.revision, bd.content, bd.head_commit_id AS "headCommitId",
+               bd.revision, bd.content, 'docx'::text AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
                bd.workspace_version AS "workspaceVersion", bd.updated_at AS "updatedAt"
         FROM docgrid.docgrid_branch_documents bd
         JOIN docgrid.workspace_documents d ON d.id = bd.document_id
@@ -376,7 +393,7 @@ export class DocGridService {
       if (branch.name === 'main') throw new ForbiddenException('Основной вариант изменяется только через PR. Создайте рабочий вариант.');
       const rows = await tx.$queryRaw<BranchDocumentRow[]>`
         SELECT bd.branch_id AS "branchId", bd.document_id AS "documentId", d.title, d.path,
-               bd.revision, bd.content, bd.head_commit_id AS "headCommitId",
+               bd.revision, bd.content, 'docx'::text AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
                bd.workspace_version AS "workspaceVersion", bd.updated_at AS "updatedAt"
         FROM docgrid.docgrid_branch_documents bd
         JOIN docgrid.workspace_documents d ON d.id = bd.document_id
@@ -394,7 +411,10 @@ export class DocGridService {
         await tx.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET base_content=${targetRows[0].content},base_branch_id=${target.id}::uuid WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
         await this.event(tx,branch.projectId,ownerId,'conflict.resolved','document',documentId,{sourceBranchId:branchId,targetBranchId:target.id,targetRevision:dto.targetRevision});
       }
-      if (current.content === dto.content && !dto.targetBranchId) return { ...current, commit: null, checks:checkDocument(current.content,current.revision) };
+      if (current.content === dto.content && !dto.targetBranchId) {
+        if (!current.formatVersion) await this.persistDocx(tx, branchId, documentId, current.headCommitId, current.content);
+        return { ...current, fileFormat: 'docx', formatVersion: current.formatVersion || DOCX_STRUCTURE_VERSION, commit: null, checks:checkDocument(current.content,current.revision) };
+      }
 
       const nextRevision = current.revision + 1;
       const hash = this.hashCommit(branchId, documentId, nextRevision, dto.message.trim(), dto.content);
@@ -414,11 +434,12 @@ export class DocGridService {
             workspace_version = ${workspaceVersion}, updated_at = CURRENT_TIMESTAMP
         WHERE branch_id = ${branchId}::uuid AND document_id = ${documentId}::uuid
       `;
+      await this.persistDocx(tx, branchId, documentId, commits[0].id, dto.content);
       await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branchId}::uuid`;
       await tx.$executeRaw`UPDATE docgrid.workspace_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branch.projectId}::uuid`;
       await this.event(tx, branch.projectId, ownerId, 'commit.created', 'commit', commits[0].id, { branch: branch.name, documentId, revision: nextRevision, hash });
-      return { ...current, content: dto.content, revision: nextRevision, headCommitId: commits[0].id, workspaceVersion, commit: commits[0], checks:checkDocument(dto.content,nextRevision) };
-    });
+      return { ...current, fileFormat: 'docx', formatVersion: DOCX_STRUCTURE_VERSION, content: dto.content, revision: nextRevision, headCommitId: commits[0].id, workspaceVersion, commit: commits[0], checks:checkDocument(dto.content,nextRevision) };
+    }, { timeout: 30000 });
   }
 
   async listCommits(ownerId: string, branchId: string, limit = 50) {
@@ -630,6 +651,7 @@ export class DocGridService {
             WHERE branch_id = ${target.id}::uuid AND document_id = ${row.documentId}::uuid
           `;
         }
+        await this.persistDocx(tx, target.id, row.documentId, commits[0].id, after);
         if (target.name === 'main') {
           const pseudo: BranchDocumentRow = {
             branchId: target.id, documentId: row.documentId, title: row.title, path: '/',
@@ -653,7 +675,7 @@ export class DocGridService {
       await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${target.id}::uuid`;
       await this.event(tx, review.projectId, ownerId, 'review.merged', 'review', review.id, { source: source.name, target: target.name, documents: changed.length,checks:checks.map(c=>({documentId:c.documentId,contentHash:c.contentHash,errors:c.errors,warnings:c.warnings,engineVersion:c.engineVersion})) });
       return { ...review, checks, status: 'MERGED', mergedBy: ownerId, mergedAt: new Date() };
-    });
+    }, { timeout: 30000 });
     if ('conflict' in result) throw new ConflictException(result);
     return result;
   }
@@ -1207,4 +1229,3 @@ export class DocGridService {
     `;
   }
 }
-
