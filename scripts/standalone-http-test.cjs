@@ -40,6 +40,7 @@ async function run(args) {
   await call(prefix+'/materials/'+material.id+'/download','GET',undefined,jwt('stranger'),404);
   await require('./folder-share-acceptance.cjs')({call,jwt,base,db});
   if(process.argv.includes('--shares-only')){clearTimeout(timeout);passed=true;return;}
+  if(process.argv.includes('--docx-only')){await require('./document-structure-http-acceptance.cjs')({call,jwt,base,db});clearTimeout(timeout);passed=true;return;}
   await require('./office-http-acceptance.cjs')({call,prefix,jwt,base});
   await require('./document-quality-http-acceptance.cjs')({call,jwt});
   await require('./document-structure-http-acceptance.cjs')({call,jwt,base,db});

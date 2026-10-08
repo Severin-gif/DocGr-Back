@@ -30,6 +30,18 @@ module.exports=async({call,jwt,base,db})=>{
  await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
  const beforeConversion=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(beforeConversion.fileFormat,'docx','legacy documents open through the DOCX reader');assert.equal(beforeConversion.formatVersion,null);
  const legacy=await bytes(path(main.id,current.revision));assert.deepEqual(await bytes(path(main.id,current.revision)),legacy);
+ assert.deepEqual(legacy,merged,'reuse the existing commit instead of rendering legacy branch again');
+ const sibling=await call(root+'/branches','POST',{name:'Старая редакция',fromBranchId:main.id},jwt('owner'),201);
+ const [head]=await db.$queryRaw`SELECT head_commit_id FROM docgrid.docgrid_branch_documents WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid.docgrid_commits SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE id=${head.head_commit_id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE head_commit_id=${head.head_commit_id}::uuid`;
+ // Simultaneous requests from branches that share a legacy commit must converge.
+ const converted=await Promise.all([bytes(path(main.id,current.revision)),bytes(path(sibling.id,current.revision))]);
+ assert.deepEqual(converted[0],converted[1]);
+ assert.deepEqual(await bytes(path(main.id,current.revision)),converted[0]);
+ await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${sibling.id}::uuid AND document_id=${document.id}::uuid`;
+ await call('/api/docgrid/branches/'+sibling.id+'/documents/'+document.id,'PUT',{revision:current.revision,content:current.content,message:'Без изменения текста'});
+ assert.deepEqual(await bytes(path(sibling.id,current.revision)),converted[0],'unchanged save also reuses the commit');
  const unchanged=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(unchanged.revision,current.revision);assert.equal(unchanged.content,current.content);
  await call(root+'/document-draft.docx','POST',{content:'# Черновик'},jwt('stranger'),404);
  const recovery=await fetch(base+root+'/document-draft.docx',{method:'POST',headers:{authorization:'Bearer '+jwt('owner'),'content-type':'application/json'},body:JSON.stringify({content:'# Черновик'})});assert.equal(recovery.status,200);assert.equal(Buffer.from(await recovery.arrayBuffer()).subarray(0,2).toString(),'PK');

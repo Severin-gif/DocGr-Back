@@ -1,4 +1,5 @@
 import { renderWorkspaceDocx } from './workspace-document-export';
+import { commitDocxSnapshot } from './commit-docx-snapshot';
 import { DOCX_STRUCTURE_VERSION } from './document-structure';
 import { AiTimeBudgetService } from './ai-time-budget.service';
 import { checkDocument, normalizeDocumentContent } from './document-quality';
@@ -102,10 +103,12 @@ export class DocGridService {
   }
 
   private async persistDocx(db: Db, branchId: string, documentId: string, commitId: string | null, content: string) {
-    const bytes = await renderWorkspaceDocx(content);
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${DOCX_STRUCTURE_VERSION} WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
-    if (commitId) await db.$executeRaw`UPDATE docgrid.docgrid_commits SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${DOCX_STRUCTURE_VERSION} WHERE id=${commitId}::uuid AND docx_bytes IS NULL`;
+    const {bytes,digest,version}=await commitDocxSnapshot(db,documentId,commitId,content);
+    if(commitId){
+      await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${version} WHERE head_commit_id=${commitId}::uuid AND document_id=${documentId}::uuid AND content=${content}`;
+    }else{
+      await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${version} WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
+    }
   }
 
   private async ensureMainBranch(db: Db, ownerId: string, projectId: string): Promise<BranchRow> {
