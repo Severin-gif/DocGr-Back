@@ -11,7 +11,7 @@ RUN npm run build
 FROM node:24-bookworm-slim AS production
 WORKDIR /app
 ENV NODE_ENV=production PORT=4000
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3 python3-xlrd antiword util-linux libreoffice-writer fonts-dejavu-core postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3 python3-xlrd python3-openpyxl python3-lxml antiword util-linux libreoffice-writer fonts-dejavu-core postgresql-client && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 COPY prisma ./prisma
 RUN npm ci --omit=dev --no-audit --no-fund && npx prisma generate && npm cache clean --force
