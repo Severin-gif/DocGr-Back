@@ -40,11 +40,13 @@ im.save(sys.argv[1]+'/scan.png'); im.save(sys.argv[1]+'/scan.pdf',save_all=True,
   // An unread page cannot erase an earlier extraction or be represented as a complete scan.
   const broken=await material('broken.pdf',Buffer.from('%PDF-broken'),'Preserved evidence','READY');
   await worker.enqueue();
-  await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id=${broken.id}::uuid`;
-  await worker.tick();
-  assert.equal((await call(prefix+'/materials/'+broken.id+'/text')).text,'Preserved evidence');
-  const [brokenJob]=await db.$queryRaw`SELECT state FROM docgrid.dg_ocr_jobs WHERE material_id=${broken.id}::uuid`;
-  assert.equal(brokenJob.state,'failed');
+  for(let attempt=1;attempt<=3;attempt++){
+   await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id=${broken.id}::uuid`;
+   await worker.tick();
+   assert.equal((await call(prefix+'/materials/'+broken.id+'/text')).text,'Preserved evidence');
+   const [brokenJob]=await db.$queryRaw`SELECT state,attempts,reason FROM docgrid.dg_ocr_jobs WHERE material_id=${broken.id}::uuid`;
+   assert.equal(brokenJob.attempts,attempt);assert.equal(brokenJob.reason,'ocr_processing_failed');assert.equal(brokenJob.state,attempt<3?'queued':'failed');
+  }
   // Relevant evidence after the old 5,000-character cutoff and after the first 20 files.
   for(let n=0;n<24;n++)await material('filler'+n+'.txt',Buffer.from('irrelevant'),'irrelevant','READY');
   const longText='Вводные материалы. '.repeat(900)+'Взыскание задолженности с контрагента Ромашка. Уникальныйфакт 987654.';
