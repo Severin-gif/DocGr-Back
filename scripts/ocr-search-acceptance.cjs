@@ -24,6 +24,9 @@ im.save(sys.argv[1]+'/scan.png'); im.save(sys.argv[1]+'/scan.pdf',save_all=True,
   const worker=app.get(DocGridOcrService);
   await call(prefix+'/extraction','GET',undefined,jwt('stranger'),404);
   await worker.enqueue();
+  // Other acceptance suites also leave PDF fixtures in the global queue.
+  // Give these two fixtures explicit priority instead of relying on UUID ordering.
+  await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id IN (${png.id}::uuid,${pdf.id}::uuid)`;
   // Simulate a terminated worker: page 1 is durable, lease expired; page 2 must resume.
   await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET state='running',attempts=1,lease_until=now()-interval '1 minute',lease_token=${randomUUID()}::uuid WHERE material_id=${pdf.id}::uuid`;
   await db.$executeRaw`INSERT INTO docgrid.dg_ocr_pages(material_id,page,text,method,status) VALUES(${pdf.id}::uuid,1,'Сохранённая первая страница','ocr','READY')`;
@@ -35,8 +38,13 @@ im.save(sys.argv[1]+'/scan.png'); im.save(sys.argv[1]+'/scan.pdf',save_all=True,
   const jobs=(await call(prefix+'/extraction')).jobs;assert.equal(jobs.find(j=>j.id===pdf.id).state,'done');
   await call(prefix+'/materials/'+pdf.id+'/ocr','POST',{},jwt('reader'),404);
   // An unread page cannot erase an earlier extraction or be represented as a complete scan.
-  const broken=await material('broken.pdf',Buffer.from('%PDF-broken'),'Preserved evidence','READY');await worker.tick();
+  const broken=await material('broken.pdf',Buffer.from('%PDF-broken'),'Preserved evidence','READY');
+  await worker.enqueue();
+  await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id=${broken.id}::uuid`;
+  await worker.tick();
   assert.equal((await call(prefix+'/materials/'+broken.id+'/text')).text,'Preserved evidence');
+  const [brokenJob]=await db.$queryRaw`SELECT state FROM docgrid.dg_ocr_jobs WHERE material_id=${broken.id}::uuid`;
+  assert.equal(brokenJob.state,'failed');
   // Relevant evidence after the old 5,000-character cutoff and after the first 20 files.
   for(let n=0;n<24;n++)await material('filler'+n+'.txt',Buffer.from('irrelevant'),'irrelevant','READY');
   const longText='Вводные материалы. '.repeat(900)+'Взыскание задолженности с контрагента Ромашка. Уникальныйфакт 987654.';
