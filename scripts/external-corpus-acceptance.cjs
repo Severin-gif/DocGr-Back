@@ -7,7 +7,12 @@ module.exports=async({call,jwt,base,db})=>{
  await call('/api/docgrid/repositories','GET',undefined,guest);
  await call(root+'/members','PUT',{email:'corpus-reader@example.test',role:'READER'},owner);
  async function upload(title,text,path='/Case') {const form=new FormData();form.append('path',path);form.append('file',new Blob([text]),title);const r=await fetch(base+root+'/materials',{method:'POST',headers:{authorization:'Bearer '+owner},body:form});const data=await r.json();assert.equal(r.status,201,JSON.stringify(data));return data;}
- const text=await upload('proof.txt','A😀Б доказательство\n'+ 'текст '.repeat(10000)),html=await upload('decision.html','<h1>Решение</h1><p>Долг &amp; проценты</p><script>hidden secret</script>');
+ const htmlBody='Видимый текст 😀. '.repeat(4000);
+ const htmlInput='<h1>Решение</h1><p>Долг &amp; проценты</p>'
+  +'<template><template>inner</template>LEAK<script>hidden secret</script><style>hidden css</style><div><template>hidden nested</template>LEAK</div></template>'
+  +'<span>'+htmlBody+'</span><p>Конец</p>';
+ const htmlExpected='Решение\n\nДолг & проценты\n'+htmlBody+'\nКонец';
+ const text=await upload('proof.txt','A😀Б доказательство\n'+ 'текст '.repeat(10000)),html=await upload('decision.html',htmlInput);
  const scan=await upload('scan.pdf','%PDF- invalid'),hidden=await upload('private.txt','PRIVATE','/Case2');
  const doc=await call(root+'/artifacts','POST',{title:'Договор',path:'/Case',content:'<!-- docgrid-richtext-v1 --><p>Первый абзац</p><table><tr><td>Сумма</td><td>100</td></tr></table>'},owner,201);
  const [identity]=await db.$queryRaw`SELECT owner_id FROM docgrid.workspace_projects WHERE id=${p.id}::uuid`;const ownerId=identity.owner_id;
@@ -31,7 +36,18 @@ module.exports=async({call,jwt,base,db})=>{
  assert.ok(combined.startsWith('A😀Б '));
  const first=await call(endpoint(source),'GET',undefined,null);assert.equal(first.nextOffset,50000);const second=await call(endpoint(source,first.nextOffset),'GET',undefined,null);assert.equal(second.nextOffset,null);assert.equal(first.text+second.text,'A😀Б доказательство\n'+ 'текст '.repeat(10000));
  const rich=await call(endpoint(docSource),'GET',undefined,null);assert.match(rich.text,/Первый абзац/);assert.match(rich.text,/Сумма\t100/);assert.ok(!rich.text.includes('<p>'));
- const htmlText=await call(endpoint(htmlSource),'GET',undefined,null);assert.match(htmlText.text,/Долг & проценты/);assert.ok(!htmlText.text.includes('hidden secret'));
+ assert.equal(htmlSource.status,'READY');assert.equal(htmlSource.reason,'html');assert.equal(htmlSource.characters,Array.from(htmlExpected).length);
+ let htmlOffset=0,htmlCombined='',htmlChunks=0;
+ do {
+  const chunk=await call(endpoint(htmlSource,htmlOffset),'GET',undefined,null);
+  assert.equal(chunk.version,htmlSource.version);assert.equal(chunk.offset,htmlOffset);assert.equal(chunk.offsetUnit,'UTF-16 code units');
+  assert.equal(chunk.totalCharacters,htmlExpected.length);assert.equal(chunk.status,'READY');
+  assert.deepEqual(chunk.pages,[]);assert.equal(chunk.pageOffsetUnit,'UTF-16 code units');
+  htmlCombined+=chunk.text;htmlChunks++;
+  assert.ok(chunk.nextOffset===null||chunk.nextOffset>htmlOffset);htmlOffset=chunk.nextOffset;
+ } while(htmlOffset!==null);
+ assert.ok(htmlChunks>1);assert.equal(htmlCombined,htmlExpected);assert.ok(!htmlCombined.includes('LEAK'));assert.ok(!htmlCombined.includes('hidden secret'));
+ const htmlDownload=await fetch(base+pub+`/files/material/${html.id}/download`);assert.equal(htmlDownload.status,200);assert.equal(await htmlDownload.text(),htmlInput);
  const artifact=manifest.sources.find(s=>s.id===prepared.id);assert.equal(artifact.kind,'artifact');assert.equal((await call(endpoint(artifact),'GET',undefined,null)).text,'Подготовленный иск: взыскать 100 рублей');
  const missing=manifest.sources.find(s=>s.id===scan.id);assert.equal((await call(endpoint(missing),'GET',undefined,null)).text,'');
  await call(pub+`/files/material/${hidden.id}/text?version=${source.version}`,'GET',undefined,null,404);
@@ -43,7 +59,8 @@ module.exports=async({call,jwt,base,db})=>{
  await call(pub+`/manifest?offset=2&indexVersion=${page.indexVersion}`,'GET',undefined,null,409);
  const updated=await call(pub+'/manifest','GET',undefined,null);assert.notEqual(updated.sources.find(s=>s.id===text.id).version,source.version);
  await call(root+'/ai-corpus?path=%2FCase','GET',undefined,guest,404);
- const coverage=await call(root+'/ai-corpus?path=%2FCase');assert.equal(coverage.total,5);
+ const coverage=await call(root+'/ai-corpus?path=%2FCase');assert.equal(coverage.total,5);assert.equal(coverage.indexed,5);
+ assert.equal(coverage.indexComplete,true);assert.equal(coverage.ready,4);assert.equal(coverage.partial,0);assert.equal(coverage.unread,1);
  const grantInput={agentRef:'external-llm',actions:['docgrid_get_capabilities'],expiresAt,maxOperations:10};
  const external=await call(root+'/agents/grants','POST',{...grantInput,requestKey:'external-corpus'},owner,201);
  const builtin=await call(root+'/agents/grants','POST',{...grantInput,requestKey:'corpus-builtin-fixture'},owner,201);

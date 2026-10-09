@@ -11,7 +11,8 @@ class Reader(HTMLParser):
         self.parts = []
         self.length = 0
         self.partial = False
-        self.hidden = None
+        self.hidden = []
+        self.excluded = {'script', 'style', 'head', 'iframe', 'object', 'svg', 'math', 'template'}
         self.blocks = {'p', 'div', 'section', 'article', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'tr', 'table', 'ul', 'ol'}
 
     def emit(self, value):
@@ -22,17 +23,18 @@ class Reader(HTMLParser):
         self.length += len(value)
 
     def handle_starttag(self, tag, attrs):
-        if self.hidden:
-            return
-        if tag in {'script', 'style', 'head', 'iframe', 'object', 'svg', 'math', 'template'}:
-            self.hidden = tag
-        elif tag in self.blocks or tag == 'br':
+        # Track excluded descendants too: closing an inner element must not
+        # expose text that is still inside an excluded ancestor.
+        if tag in self.excluded:
+            self.hidden.append(tag)
+        elif not self.hidden and (tag in self.blocks or tag == 'br'):
             self.emit('\n')
 
     def handle_endtag(self, tag):
         if self.hidden:
-            if tag == self.hidden:
-                self.hidden = None
+            # Unmatched closing tags cannot release an excluded ancestor.
+            if tag == self.hidden[-1]:
+                self.hidden.pop()
         elif tag in self.blocks:
             self.emit('\n')
         elif tag in {'td', 'th'}:
