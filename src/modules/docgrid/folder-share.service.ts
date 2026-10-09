@@ -9,6 +9,7 @@ import { DOCX_STRUCTURE_VERSION } from './document-structure';
 import { renderWorkspaceDocx } from './workspace-document-export';
 import { extractMaterialText } from './docgrid-material-extraction';
 import { officeView } from './office-view';
+import { CorpusRow,corpusReport,corpusSource,documentText } from './shared-corpus';
 import { editSpreadsheet } from './office-edit';
 type Db=Prisma.TransactionClient;
 type Share={id:string;project_id:string;path:string;mode:string;name:string;expires_at:Date;revoked_at:Date|null};
@@ -61,6 +62,80 @@ export class FolderShareService {
   await this.access(tx,user,project,true);
   const rows=await tx.$queryRaw<any[]>`UPDATE docgrid.dg_folder_shares SET revoked_at=COALESCE(revoked_at,CURRENT_TIMESTAMP) WHERE id=${id}::uuid AND project_id=${project}::uuid RETURNING id`;
   if(!rows[0])throw new NotFoundException('Ссылка не найдена');await this.event(tx,project,user,'share.revoked',id);return {revoked:true};
+ });}
+ async accessSummary(user:string,project:string){return this.db.$transaction(async tx=>{
+  await this.access(tx,user,project,true);
+  const [counts]=await tx.$queryRaw<any[]>`SELECT
+   (SELECT count(*)::int FROM docgrid.dg_folder_shares WHERE project_id=${project}::uuid AND revoked_at IS NULL AND expires_at>now()) AS links,
+   (SELECT count(*)::int FROM docgrid.dg_astra_grants WHERE project_id=${project}::uuid AND builtin=false AND revoked_at IS NULL AND expires_at>now()) AS agents,
+   (SELECT count(*)::int FROM docgrid.docgrid_members m JOIN docgrid.workspace_projects p ON p.id=m.project_id WHERE m.project_id=${project}::uuid AND m.user_id<>p.owner_id) AS members`;
+  return counts;
+ });}
+ async revokeAll(user:string,project:string,scope:'external'|'all'){return this.db.$transaction(async tx=>{
+  await this.access(tx,user,project,true);
+  const links=await tx.$executeRaw`UPDATE docgrid.dg_folder_shares SET revoked_at=now() WHERE project_id=${project}::uuid AND revoked_at IS NULL`;
+  const agents=await tx.$executeRaw`UPDATE docgrid.dg_astra_grants SET revoked_at=now() WHERE project_id=${project}::uuid AND builtin=false AND revoked_at IS NULL`;
+  const operations=await tx.$executeRaw`UPDATE docgrid.dg_astra_operations SET status='cancelled',updated_at=now() WHERE project_id=${project}::uuid AND status IN ('running','needs_user_action') AND grant_id IN (SELECT id FROM docgrid.dg_astra_grants WHERE project_id=${project}::uuid AND builtin=false AND revoked_at IS NOT NULL)`;
+  const members=scope==='all'?await tx.$executeRaw`DELETE FROM docgrid.docgrid_members m USING docgrid.workspace_projects p WHERE m.project_id=p.id AND p.id=${project}::uuid AND m.user_id<>p.owner_id`:0;
+  const result={revoked:true,scope,links,agents,operations,members};
+  await this.event(tx,project,user,'access.revoked_all',project,result);return result;
+ });}
+ private async corpus(tx:Db,project:string,path:string){
+  // Filter at the database boundary; a prefix such as /Case never includes /Case2.
+  const [counts]=await tx.$queryRaw<Array<{total:number}>>`SELECT (
+   (SELECT count(*) FROM docgrid.docgrid_materials WHERE project_id=${project}::uuid AND deleted_at IS NULL AND (${path}='/' OR path=${path} OR left(path,length(${path})+1)=${path}||'/'))+
+   (SELECT count(*) FROM docgrid.workspace_documents d JOIN docgrid.docgrid_branch_documents b ON b.document_id=d.id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE d.project_id=${project}::uuid AND br.project_id=d.project_id AND br.name='main' AND d.docgrid_deleted_at IS NULL AND (${path}='/' OR d.path=${path} OR left(d.path,length(${path})+1)=${path}||'/'))+
+   (SELECT count(*) FROM docgrid.dg_astra_documents a WHERE a.project_id=${project}::uuid AND (${path}='/' OR a.path=${path} OR left(a.path,length(${path})+1)=${path}||'/'))
+  )::int AS total`;
+  const materials=await tx.$queryRaw<CorpusRow[]>`SELECT m.id,m.title,m.path,'material' AS kind,m.mime,m.sha256,
+   encode(sha256(convert_to(m.extracted_text,'UTF8')),'hex') AS fingerprint,encode(sha256(convert_to(m.extracted_pages::text,'UTF8')),'hex') AS "pageFingerprint",
+   LEAST(char_length(m.extracted_text),2000000) AS characters,m.extracted_text ~ '[^[:space:]]' AS "hasText",
+   CASE WHEN char_length(m.extracted_text)>2000000 THEN 'PARTIAL' ELSE m.extraction_status END AS status,
+   CASE WHEN char_length(m.extracted_text)>2000000 THEN 'text_limit' ELSE m.extraction_reason END AS reason,j.total_pages AS "totalPages",j.state AS "ocrState"
+   FROM docgrid.docgrid_materials m LEFT JOIN docgrid.dg_ocr_jobs j ON j.material_id=m.id
+   WHERE m.project_id=${project}::uuid AND m.deleted_at IS NULL AND (${path}='/' OR m.path=${path} OR left(m.path,length(${path})+1)=${path}||'/') ORDER BY m.path,m.title,m.id LIMIT 5000`;
+  const documents=await tx.$queryRaw<CorpusRow[]>`WITH sources AS (
+   SELECT d.id,d.title,d.path,'document' AS kind,b.revision,b.content
+   FROM docgrid.workspace_documents d JOIN docgrid.docgrid_branch_documents b ON b.document_id=d.id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id
+   WHERE d.project_id=${project}::uuid AND br.project_id=d.project_id AND br.name='main' AND d.docgrid_deleted_at IS NULL AND (${path}='/' OR d.path=${path} OR left(d.path,length(${path})+1)=${path}||'/')
+   UNION ALL
+   SELECT d.id,d.title,a.path,'artifact' AS kind,d.current_version AS revision,COALESCE(v.plain_text,'') AS content
+   FROM docgrid.dg_astra_documents a JOIN docgrid.prepared_legal_documents d ON d.id=a.document_id LEFT JOIN docgrid.document_versions v ON v.document_id=d.id AND v.version=d.current_version
+   WHERE a.project_id=${project}::uuid AND (${path}='/' OR a.path=${path} OR left(a.path,length(${path})+1)=${path}||'/')
+  ) SELECT id,title,path,kind,revision,encode(sha256(convert_to(content,'UTF8')),'hex') AS fingerprint,content,0 AS characters,true AS "hasText",'READY' AS status,NULL AS reason FROM (
+   SELECT *,sum(octet_length(content)) OVER (ORDER BY path,title,id) AS cumulative_bytes FROM sources
+  ) bounded WHERE cumulative_bytes<=33554432 ORDER BY path,title,id LIMIT 5000`;
+  return corpusReport([...materials,...documents],Number(counts.total));
+ }
+ async coverage(user:string,project:string,path:string){return this.db.$transaction(async tx=>{
+  await this.access(tx,user,project,true);return {path:folderPath(path),...await this.corpus(tx,project,folderPath(path))};
+ });}
+ async manifest(token:string,offset=0,limit=50,indexVersion?:string){return this.db.$transaction(async tx=>{
+  const share=await this.share(tx,token),report=await this.corpus(tx,share.project_id,share.path);
+  if(indexVersion&&indexVersion!==report.indexVersion)throw new ConflictException('Список источников изменился. Начните чтение списка заново.');
+  if(offset>report.indexed)throw new BadRequestException('Смещение за пределами списка');
+  return {name:share.name,path:share.path,expiresAt:share.expires_at,...report,sources:report.sources.slice(offset,offset+limit),sourceOffset:offset,nextSourceOffset:offset+limit<report.indexed?offset+limit:null};
+ });}
+ async text(token:string,kind:string,id:string,version:string,offset:number,limit:number){return this.db.$transaction(async tx=>{
+  const share=await this.share(tx,token);
+  const rows=kind==='material'
+   ?await tx.$queryRaw<Array<CorpusRow&{text:string;pages:unknown}>>`SELECT m.id,m.title,m.path,'material' AS kind,m.mime,m.sha256,
+    encode(sha256(convert_to(m.extracted_text,'UTF8')),'hex') AS fingerprint,encode(sha256(convert_to(m.extracted_pages::text,'UTF8')),'hex') AS "pageFingerprint",left(m.extracted_text,2000000) AS text,m.extracted_pages AS pages,
+    LEAST(char_length(m.extracted_text),2000000) AS characters,m.extracted_text ~ '[^[:space:]]' AS "hasText",
+    CASE WHEN char_length(m.extracted_text)>2000000 THEN 'PARTIAL' ELSE m.extraction_status END AS status,
+    CASE WHEN char_length(m.extracted_text)>2000000 THEN 'text_limit' ELSE m.extraction_reason END AS reason,j.total_pages AS "totalPages",j.state AS "ocrState"
+    FROM docgrid.docgrid_materials m LEFT JOIN docgrid.dg_ocr_jobs j ON j.material_id=m.id WHERE m.id=${id}::uuid AND m.project_id=${share.project_id}::uuid AND m.deleted_at IS NULL`
+   :kind==='document'?await tx.$queryRaw<Array<CorpusRow&{text?:string;pages?:unknown}>>`SELECT d.id,d.title,d.path,'document' AS kind,b.revision,b.content,encode(sha256(convert_to(b.content,'UTF8')),'hex') AS fingerprint,0 AS characters,true AS "hasText",'READY' AS status,NULL AS reason FROM docgrid.workspace_documents d JOIN docgrid.docgrid_branch_documents b ON b.document_id=d.id JOIN docgrid.docgrid_branches br ON br.id=b.branch_id WHERE d.id=${id}::uuid AND d.project_id=${share.project_id}::uuid AND br.project_id=d.project_id AND br.name='main' AND d.docgrid_deleted_at IS NULL AND octet_length(b.content)<=33554432`
+   :await tx.$queryRaw<Array<CorpusRow&{text?:string;pages?:unknown}>>`SELECT d.id,d.title,a.path,'artifact' AS kind,d.current_version AS revision,COALESCE(v.plain_text,'') AS content,encode(sha256(convert_to(COALESCE(v.plain_text,''),'UTF8')),'hex') AS fingerprint,0 AS characters,true AS "hasText",'READY' AS status,NULL AS reason FROM docgrid.dg_astra_documents a JOIN docgrid.prepared_legal_documents d ON d.id=a.document_id LEFT JOIN docgrid.document_versions v ON v.document_id=d.id AND v.version=d.current_version WHERE d.id=${id}::uuid AND a.project_id=${share.project_id}::uuid AND octet_length(COALESCE(v.plain_text,''))<=33554432`;
+  const row=rows[0];if(!row||!inFolder(row.path,share.path))throw new NotFoundException('Файл недоступен');
+  const source=corpusSource(row);
+  if(source.version!==version)throw new ConflictException('Текст или версия файла изменились. Получите новый список источников.');
+  const text=kind==='material'?row.text!:kind==='document'?documentText(row.content || ''):row.content || '';
+  if(offset>text.length)throw new BadRequestException('Смещение за пределами текста');
+  let end=Math.min(offset+limit,text.length);
+  // Avoid splitting an astral code point between consecutive chunks.
+  if(end<text.length&&end>offset&&/[\uD800-\uDBFF]/.test(text[end-1]))end--;
+  return {...source,text:text.slice(offset,end),offset,nextOffset:end<text.length?end:null,totalCharacters:text.length,offsetUnit:'UTF-16 code units',pages:row.pages || [],pageOffsetUnit:'UTF-16 code units'};
  });}
  async files(token:string){return this.db.$transaction(async tx=>{
   const share=await this.share(tx,token);

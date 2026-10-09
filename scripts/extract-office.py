@@ -52,8 +52,21 @@ else:
             ordered = ['word/document.xml'] + sorted(n for n in names if n.startswith('word/') and n.endswith('.xml') and n.split('/')[-1].startswith(('header', 'footer', 'footnotes', 'endnotes')))
             for name in ordered:
                 for p in xml(z, name).iter():
+                    if tag(p) in ('drawing', 'pict', 'object'):
+                        partial = True
                     if tag(p) == 'p':
                         emit(''.join((n.text or '') if tag(n) == 't' else '\t' if tag(n) == 'tab' else '\n' if tag(n) in ('br', 'cr') else '' for n in p.iter()) + '\n')
+        elif kind == 'pptx':
+            import re
+            slides = sorted((n for n in names if re.fullmatch(r'ppt/slides/slide\d+\.xml', n)), key=lambda n: int(re.search(r'(\d+)\.xml$', n).group(1)))
+            for i, name in enumerate(slides, 1):
+                emit('\nСлайд ' + str(i) + '\n')
+                for p in xml(z, name).iter():
+                    if tag(p) == 'p':
+                        emit(''.join(n.text or '' for n in p.iter() if tag(n) == 't') + '\n')
+            # Speaker notes, embedded objects and images are not extracted.
+            if any(n.startswith(('ppt/notesSlides/notesSlide', 'ppt/media/', 'ppt/embeddings/')) for n in names):
+                partial = True
         elif kind == 'odt':
             for p in xml(z, 'content.xml').iter():
                 if tag(p) in ('p', 'h'):
@@ -93,4 +106,6 @@ else:
                         break
         else:
             raise ValueError('Unsupported office file')
+        if kind in ('xlsx', 'odt') and any(n.startswith(('xl/media/', 'xl/embeddings/', 'Pictures/')) for n in names):
+            partial = True
 print(json.dumps({'text': ''.join(parts), 'partial': partial}, ensure_ascii=False))
