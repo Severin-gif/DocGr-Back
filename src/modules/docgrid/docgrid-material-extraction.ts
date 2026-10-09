@@ -30,13 +30,21 @@ export function runLimitedExtraction(command: string, args: string[], timeout = 
 /** Extraction is optional derived data. Never reject or alter an original
  * because a scanner, encrypted PDF or broken parser cannot produce text. */
 export async function extractMaterialText(title: string, bytes: Buffer): Promise<MaterialExtraction> {
-  if (/\.(txt|md)$/i.test(title)) {
-    // Decode only a bounded prefix; four bytes cover every UTF-8 code point.
-    const text = bytes.subarray(0, MATERIAL_TEXT_LIMIT * 4).toString('utf8').slice(0, MATERIAL_TEXT_LIMIT);
-    if (text.includes('\uFFFD')) return unread('invalid_utf8');
-    return { text, status: bytes.length > Buffer.byteLength(text) ? 'PARTIAL' : 'READY', reason: 'text' };
+  if (/\.(txt|md|csv|tsv|html?|xml|json)$/i.test(title)) {
+    // Streaming decoder leaves an incomplete final code point out of a bounded prefix.
+    const prefix=bytes.subarray(0,MATERIAL_TEXT_LIMIT*4);
+    let decoded:string;
+    try { decoded=new TextDecoder('utf-8',{fatal:true}).decode(prefix,{stream:prefix.length<bytes.length}); }
+    catch { return unread('invalid_utf8'); }
+    const html=/\.html?$/i.test(title);
+    if(html)return extractHtmlText(decoded,prefix.length<bytes.length);
+    const full=decoded;
+    const text=full.slice(0,MATERIAL_TEXT_LIMIT);
+    if (!text.trim()) return unread('text_empty');
+    const partial=prefix.length<bytes.length||full.length>MATERIAL_TEXT_LIMIT;
+    return {text,status:partial?'PARTIAL':'READY',reason:'text'};
   }
-  if (/\.(docx|xlsx|xls|doc|odt)$/i.test(title)) return extractOfficeText(title, bytes);
+  if (/\.(docx|xlsx|xls|doc|odt|pptx)$/i.test(title)) return extractOfficeText(title, bytes);
   if (!/\.pdf$/i.test(title) || bytes.subarray(0, 5).toString() !== '%PDF-') return unread('unsupported');
   if (bytes.length > PDF_EXTRACTION_MAX_BYTES) return unread('pdf_size_limit');
   if (pdfActive) return unread('pdf_busy');
@@ -83,4 +91,17 @@ async function extractOfficeText(title: string, bytes: Buffer): Promise<Material
     try { if(directory) await rm(directory,{recursive:true,force:true}).catch(()=>undefined); }
     finally { pdfActive=false; }
   }
+}
+
+async function extractHtmlText(decoded:string,cropped:boolean):Promise<MaterialExtraction> {
+  if(pdfActive)return unread('html_busy');
+  pdfActive=true;let directory:string|undefined;
+  try {
+    directory=await mkdtemp(join(tmpdir(),'docgrid-extract-'));
+    const input=join(directory,'source.html');await writeFile(input,decoded,{mode:0o600});
+    const output=JSON.parse(await runLimitedExtraction('python3',['-I',resolve(__dirname,'../../../scripts/extract-markup.py'),input]));
+    if(typeof output.text!=='string'||!output.text.trim())return unread('html_no_text');
+    return {text:output.text.slice(0,MATERIAL_TEXT_LIMIT),status:cropped||output.partial||output.text.length>MATERIAL_TEXT_LIMIT?'PARTIAL':'READY',reason:'html'};
+  }catch(error){return unread((error as {killed?:boolean}).killed?'html_timeout':'html_failed');}
+  finally{try{if(directory)await rm(directory,{recursive:true,force:true}).catch(()=>undefined);}finally{pdfActive=false;}}
 }

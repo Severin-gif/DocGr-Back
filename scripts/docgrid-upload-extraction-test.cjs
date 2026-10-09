@@ -59,6 +59,12 @@ function pdf() {
   assert.equal(text.status, 'PARTIAL'); assert.equal(text.text.length, 200000);
   assert.equal((await extractMaterialText('bad.txt', Buffer.from([255]))).status, 'UNREAD');
   console.log('PASS bounded UTF-8 text and honest extraction status');
+  const html=await extractMaterialText('court.html',Buffer.from('<h1>Решение</h1><p>Сумма &amp; проценты</p><script>private command</script><table><tr><td>Долг</td><td>100</td></tr></table>'));
+  assert.equal(html.status,'READY');assert.match(html.text,/Решение/);assert.match(html.text,/Долг\t100/);assert.ok(!html.text.includes('private command'));
+  assert.equal((await extractMaterialText('blank.html',Buffer.from('<script>only scripts</script>'))).status,'UNREAD');
+  assert.equal((await extractMaterialText('proof.csv',Buffer.from('Дата;Сумма\n2026-10-09;100'))).status,'READY');
+  const boundary=await extractMaterialText('boundary.txt',Buffer.from('a'.repeat(799999)+'😀tail'));assert.equal(boundary.status,'PARTIAL');assert.ok(!boundary.text.includes('\uFFFD'));
+  console.log('PASS HTML entities/tables and script exclusion, CSV, empty HTML and bounded UTF-8 boundary');
   const fixture=fs.mkdtempSync(path.join(os.tmpdir(),'dg-office-test-'));
   try {
     const make=(name,entries)=>{
@@ -70,6 +76,9 @@ function pdf() {
     const parsed=await extractMaterialText('proof.docx',doc);assert.equal(parsed.status,'READY');assert.match(parsed.text,/Сумма 100 рублей/);
     const sheet=make('proof.xlsx',{'xl/workbook.xml':'<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Расчёт" r:id="r1"/></sheets></workbook>','xl/_rels/workbook.xml.rels':'<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>','xl/sharedStrings.xml':'<sst><si><t>Долг</t></si></sst>','xl/worksheets/sheet1.xml':'<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1"><v>100</v></c><c r="C1"><f>B1*2</f></c></row></sheetData></worksheet>'});
     const cells=await extractMaterialText('proof.xlsx',sheet);assert.equal(cells.status,'PARTIAL');assert.match(cells.text,/Расчёт/);assert.match(cells.text,/A1: Долг/);assert.match(cells.text,/B1: 100/);
+    const slides=make('proof.pptx',{'ppt/slides/slide10.xml':'<slide><p><t>Слайд десять</t></p></slide>','ppt/slides/slide2.xml':'<slide><p><t>Слайд два</t></p></slide>','ppt/media/image1.png':'fixture'});
+    const ppt=await extractMaterialText('proof.pptx',slides);assert.equal(ppt.status,'PARTIAL');assert.ok(ppt.text.indexOf('Слайд два')<ppt.text.indexOf('Слайд десять'));
+    const drawing=make('drawing.docx',{'word/document.xml':'<document><p><t>Текст и рисунок</t><drawing/></p></document>'});assert.equal((await extractMaterialText('drawing.docx',drawing)).status,'PARTIAL');
     const odt=make('proof.odt',{'content.xml':'<document><p>Текст ODT</p></document>'});assert.match((await extractMaterialText('proof.odt',odt)).text,/Текст ODT/);
     const entity=make('bad.docx',{'word/document.xml':'<!DOCTYPE d [<!ENTITY x SYSTEM "file:///etc/passwd">]><document><p><t>&x;</t></p></document>'});assert.equal((await extractMaterialText('bad.docx',entity)).status,'UNREAD');
     const bomb=make('large.docx',{'word/document.xml':'x'.repeat(33*1024*1024)});assert.equal((await extractMaterialText('large.docx',bomb)).status,'UNREAD');
