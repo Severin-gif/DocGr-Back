@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { resolveDocGridTokenAccess, type DocGridAccess } from './product-access';
 import { config } from "./config.js";
 
 export type DocGridIdentity = {
@@ -7,6 +8,7 @@ export type DocGridIdentity = {
   name?: string | null;
   role: "USER" | "ADMIN";
   plan: "free" | "basic" | "standard" | "pro" | "business";
+  docgridAccess?: DocGridAccess;
   typ: "docgrid_access";
   iss: string;
   aud: string | string[];
@@ -65,6 +67,7 @@ export function verifyDocGridAccessToken(token: string, nowSeconds = Math.floor(
     throw new Error("invalid_iat");
   }
 
+  payload.docgridAccess = resolveDocGridTokenAccess(payload.docgridAccess, nowSeconds * 1000);
   return payload as DocGridIdentity;
 }
 

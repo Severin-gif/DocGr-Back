@@ -1,3 +1,4 @@
+import { type DocGridAccess } from '../../product-access';
 import { verifyDocGridAccessToken } from '../../docgrid-identity';
 import {
   CanActivate,
@@ -19,6 +20,7 @@ type TrustedDocGridIdentity = {
   name?: string | null;
   role: 'USER' | 'ADMIN';
   plan: string;
+  docgridAccess?: DocGridAccess;
 };
 
 @Injectable()
@@ -146,10 +148,11 @@ export class DocGridIdentityGuard implements CanActivate {
       email: user.email,
       role: identity.role,
       plan: identity.plan,
+      codexPlan: identity.plan,
+      docgridAccess: identity.docgridAccess,
       externalSubject: identity.sub,
       identityProvider: PROVIDER,
     };
     return true;
   }
 }
-
