@@ -27,3 +27,30 @@ Docker includes Poppler and resource limits for isolated PDF extraction, LibreOf
 - `npm run test:embedded`: same HTTP acceptance through a local PGlite PostgreSQL wire server; real PostgreSQL CI remains authoritative for concurrency.
 
 See [cutover](docs/standalone-cutover.md) for the deployment sequence and checks.
+
+## Product access contract (10 October 2026)
+
+AI-Orchestra remains the shared identity and CODEX billing authority. The
+legacy `plan` claim / mirrored `User.plan` describe CODEX, not a DocGrid paid
+plan. Verified dedicated tokens can additionally carry `docgridAccess`.
+The guard puts separate `codexPlan` and `docgridAccess` in `request.user` while
+keeping old fields and project membership/ownership checks unchanged.
+
+Sources compose independently: CODEX Pro, a standalone DocGrid period and
+legacy Business. Early workspace access remains available. Period ends are
+rechecked on every token verification; early access does not invent paid
+rights from a missing claim or an old global plan. Revocations are reflected
+at token re-exchange, bounded by the existing 60–900-second JWT TTL (normally
+300 seconds); immediate online revocation is a prerequisite decision before
+paid-only gates are launched.
+
+No new paid quotas or checkout are enabled here. Licensed document products
+are separate SKU/terms-version grants in AI-Orchestra, not CODEX upgrades or
+DocGrid membership. Buying a product must never bypass project ACLs. License
+content delivery requires a fresh server check and remains a later phase.
+
+Deploy the additive AI-Orchestra migration and issuer first, then this API,
+then the frontend. Existing accounts, projects, source files, versions, roles
+and current storage/AI limits remain intact. See
+https://github.com/Severin-gif/AI-Orchestra/blob/main/docs/product-tariff-architecture.md
+for the capability matrix, pending prices/license terms and payment rollout.

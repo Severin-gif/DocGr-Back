@@ -61,3 +61,16 @@ test("rejects expired or wrong-audience identity tokens", () => {
   );
 });
 
+
+test("dedicated product claims survive a Free CODEX plan and expire independently of JWT", () => {
+  const until = new Date((now + 30) * 1000).toISOString();
+  const token = sign({ ...payload, plan: "free", docgridAccess: { version: 1, workspace: true, subscriptionAccess: true, checkoutEnabled: false,
+    sources: [{ kind: "early_access", validUntil: null }, { kind: "docgrid_subscription", validUntil: until }] } });
+  assert.equal(verifyDocGridAccessToken(token, now).plan, "free");
+  assert.equal(verifyDocGridAccessToken(token, now).docgridAccess.subscriptionAccess, true);
+  assert.equal(verifyDocGridAccessToken(token, now + 30).docgridAccess.subscriptionAccess, false);
+});
+
+test("rejects malformed product rights even in a correctly signed token", () => {
+  assert.throws(() => verifyDocGridAccessToken(sign({ ...payload, docgridAccess: null }), now), /invalid_product_access/);
+});
