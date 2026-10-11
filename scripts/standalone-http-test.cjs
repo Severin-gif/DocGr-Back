@@ -32,6 +32,8 @@ async function run(args) {
   const forged=await fetch(base+'/api/docgrid/repositories',{headers:{'x-docgrid-service-token':'b'.repeat(64),'x-docgrid-subject':'owner','x-docgrid-email':'owner@example.test','x-docgrid-role':'ADMIN','x-docgrid-plan':'pro'}});assert.equal(forged.status,401);
   await call('/api/docgrid/internal/agent-oauth/codes','POST',{},null,404);await call('/api/projects','GET',undefined,null,404);
   const p=await call('/api/docgrid/repositories','POST',{name:'Standalone test'},jwt('owner'),201);const prefix='/api/docgrid/repositories/'+p.id;
+  await require('./project-slug-acceptance.cjs')({call,jwt});
+  if(process.argv.includes('--slugs-only')){clearTimeout(timeout);passed=true;return;}
   await call(prefix+'/overview','GET',undefined,jwt('stranger'),404);
   await call(prefix+'/folders','POST',{path:'/Case/Nested'},jwt('owner'),201);
   const bytes=Buffer.from('Original evidence\n');const form=new FormData();form.append('path','/Case/Nested');form.append('file',new Blob([bytes],{type:'text/plain'}),'proof.txt');
