@@ -52,6 +52,8 @@ async function run(args) {
   await call(prefix+'/agents/grants','GET',undefined,grant.token,401);
   const catalog=await call('/api/docgrid/agents/catalog?projectId='+p.id,'GET',undefined,grant.token);assert.ok(catalog.tools.length);
   const mcp=await call('/api/docgrid/mcp/'+p.id,'POST',{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},grant.token);assert.ok(mcp.result?.tools?.length,JSON.stringify(mcp));
+  await require('./user-admin-acceptance.cjs')({base,call,jwt,db,p,grant});
+  if(process.argv.includes('--users-only')){clearTimeout(timeout);passed=true;return;}
   await require('./file-management-acceptance.cjs')({call,jwt,base});
   await require('./court-package-acceptance.cjs')({call,jwt,base});
   await require('./context-acceptance.cjs')({call,jwt,db,app});

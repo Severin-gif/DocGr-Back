@@ -54,3 +54,13 @@ then the frontend. Existing accounts, projects, source files, versions, roles
 and current storage/AI limits remain intact. See
 https://github.com/Severin-gif/AI-Orchestra/blob/main/docs/product-tariff-architecture.md
 for the capability matrix, pending prices/license terms and payment rollout.
+
+## Управление пользователями DocGrid
+
+`GET /internal/docgrid/admin/users?q=&status=all|active|blocked&page=1` — список по 50 пользователей, без паролей и токенов. Список содержит локальные учётные записи DocGrid, связанные с AI-Orchestra. Роль и тариф CODEX здесь только читаются.
+
+`POST /internal/docgrid/admin/users/:id/access` — `{ "blocked": true, "reason": "Причина" }`, разблокировка — `blocked: false`. Нужны серверный `x-docgrid-admin-token` (DOCGRID_ADMIN_TOKEN, минимум 32 символа) и `x-docgrid-admin-actor` с ID администратора из проверенной сессии lex-admin. Изменение и запись аудита атомарны.
+
+`GET /internal/docgrid/admin/users/:id/history` — последние 100 изменений доступа. Блокировка действует для новых запросов пользователя и его агентов, сохраняется после обновления SSO и не удаляет документы. Начатые запросы могут завершиться.
+
+Перед обновлением lex-admin применить миграцию `20261011093000_docgrid_user_admin`.
