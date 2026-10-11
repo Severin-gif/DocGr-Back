@@ -1,3 +1,4 @@
+import { projectSlug } from './project-slug';
 import { renderWorkspaceDocx } from './workspace-document-export';
 import { commitDocxSnapshot } from './commit-docx-snapshot';
 import { DOCX_STRUCTURE_VERSION } from './document-structure';
@@ -29,7 +30,7 @@ import {
 export const DOCGRID_PROJECT_MAX_BYTES = 500 * 1024 * 1024;
 
 type Db = Prisma.TransactionClient;
-type RepoRow = { id: string; name: string; description: string | null; createdAt: Date; updatedAt: Date };
+type RepoRow = { id: string; slug: string | null; name: string; description: string | null; createdAt: Date; updatedAt: Date };
 type BranchRow = { id: string; projectId: string; name: string; kind: string; createdBy: string; createdAt: Date; updatedAt: Date };
 type BranchDocumentRow = {
   branchId: string;
@@ -68,7 +69,7 @@ export class DocGridService {
 
   private async requireRepo(db: Db, ownerId: string, projectId: string, action: 'read' | 'write' | 'merge' | 'owner' = 'read'): Promise<RepoRow> {
     const rows = await db.$queryRaw<RepoRow[]>`
-      SELECT p.id, p.name, p.description, p.created_at AS "createdAt", p.updated_at AS "updatedAt"
+      SELECT p.id, p.slug, p.name, p.description, p.created_at AS "createdAt", p.updated_at AS "updatedAt"
       FROM docgrid.workspace_projects p
       WHERE p.id = ${projectId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (
         SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}
@@ -143,14 +144,23 @@ export class DocGridService {
     const name = dto.name.trim();
     if (!name) throw new BadRequestException('Название проекта обязательно');
     return this.prisma.$transaction(async tx => {
+      const base = projectSlug(name);
+      // Serialize allocation for equal names; the unique index is the final guard.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${base})::bigint)::text AS lock`;
+      let slug = base;
+      while (await tx.workspaceProject.findUnique({ where: { slug }, select: { id: true } })) {
+        slug = `${base}--${randomUUID().slice(0, 8)}`;
+      }
       const project = await tx.workspaceProject.create({
         data: {
           ownerId,
+          slug,
           name,
           description: dto.description?.trim() || null,
         },
         select: {
           id: true,
+          slug: true,
           name: true,
           description: true,
           createdAt: true,
@@ -179,7 +189,7 @@ export class DocGridService {
       const project = await tx.workspaceProject.update({
         where: { id: projectId },
         data: { name, description: dto.description?.trim() || null },
-        select: { id: true, name: true, description: true, createdAt: true, updatedAt: true },
+        select: { id: true, slug: true, name: true, description: true, createdAt: true, updatedAt: true },
       });
       await this.event(tx, projectId, ownerId, 'repository.updated', 'repository', projectId, { name, description: project.description });
       return project;
@@ -250,7 +260,7 @@ export class DocGridService {
 
   async listRepositories(ownerId: string) {
     const repos = await this.prisma.$queryRaw<Array<RepoRow & { documents: bigint; branches: bigint; openReviews: bigint; openIssues: bigint }>>`
-      SELECT p.id, p.name, p.description, p.created_at AS "createdAt", p.updated_at AS "updatedAt",
+      SELECT p.id, p.slug, p.name, p.description, p.created_at AS "createdAt", p.updated_at AS "updatedAt",
         (SELECT COUNT(*) FROM docgrid.workspace_documents d WHERE d.project_id = p.id) AS documents,
         (SELECT COUNT(*) FROM docgrid.docgrid_branches b WHERE b.project_id = p.id) AS branches,
         (SELECT COUNT(*) FROM docgrid.docgrid_reviews r WHERE r.project_id = p.id AND r.status IN ('OPEN','CONFLICT')) AS "openReviews",

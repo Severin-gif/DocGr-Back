@@ -1,0 +1,20 @@
+const assert = require('node:assert/strict');
+module.exports = async ({call, jwt}) => {
+  const create = () => call('/api/docgrid/repositories', 'POST', {name:'Тимаева'}, jwt('owner'), 201);
+  const [first, second] = await Promise.all([create(), create()]);
+  assert.notEqual(first.slug, second.slug);
+  assert.ok([first.slug, second.slug].includes('timaeva'));
+  assert.match(first.slug, /^timaeva(?:--[0-9a-f]{8})?$/);
+  assert.match(second.slug, /^timaeva(?:--[0-9a-f]{8})?$/);
+  const prefix = '/api/docgrid/repositories/' + first.id;
+  const renamed = await call(prefix, 'PUT', {name:'Новое название'}, jwt('owner'));
+  assert.equal(renamed.slug, first.slug);
+  const overview = await call(prefix + '/overview');
+  assert.equal(overview.repository.slug, first.slug);
+  assert.equal(overview.repository.name, 'Новое название');
+  assert.equal((await call('/api/docgrid/repositories')).find(p => p.id === first.id).slug, first.slug);
+  assert.equal((await call('/api/docgrid/home')).repositories.find(p => p.id === first.id).slug, first.slug);
+  assert.ok(!(await call('/api/docgrid/repositories','GET',undefined,jwt('stranger'))).some(p => p.slug === first.slug));
+  await call(prefix + '/overview','GET',undefined,jwt('stranger'),404);
+  console.log('PASS persistent project slugs, concurrent equal names, UUID access, rename stability and authorization');
+};

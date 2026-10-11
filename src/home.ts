@@ -2,6 +2,7 @@ export type HomeMode = "feed" | "journal";
 
 export type HomeRepository = {
   id: string;
+  slug?: string | null;
   name: string;
   description?: string | null;
   createdAt?: string;
