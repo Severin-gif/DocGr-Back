@@ -23,6 +23,7 @@ model User {
   lastLoginAt        DateTime?
   identityProvider   String?              @map("identity_provider") @db.VarChar(32)
   externalSubject    String?              @map("external_subject") @db.VarChar(128)
+  accessBlockedAt    DateTime?             @map("access_blocked_at") @db.Timestamptz(6)
   localLoginDisabled Boolean              @default(false) @map("local_login_disabled")
   workspaceProjects WorkspaceProject[]         @relation("WorkspaceProjectOwner")
   workspaceVersions WorkspaceDocumentVersion[] @relation("WorkspaceDocumentVersionAuthor")

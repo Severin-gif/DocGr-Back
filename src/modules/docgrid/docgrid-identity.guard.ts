@@ -1,6 +1,7 @@
 import { type DocGridAccess } from '../../product-access';
 import { verifyDocGridAccessToken } from '../../docgrid-identity';
 import {
+  ForbiddenException,
   CanActivate,
   ExecutionContext,
   Injectable,
@@ -142,6 +143,8 @@ export class DocGridIdentityGuard implements CanActivate {
     if (identity.sub.length > 128 || identity.email.length > 320 || !identity.email.includes('@') || (identity.name && identity.name.length > 200)) throw new UnauthorizedException('Malformed identity');
     identity.email = identity.email.trim().toLowerCase();
     const user = await this.mirror(identity);
+    const access = await this.prisma.user.findUnique({where:{id:user.id},select:{accessBlockedAt:true}});
+    if (!access || access.accessBlockedAt) throw new ForbiddenException('Доступ к DocGrid заблокирован');
 
     request.user = {
       id: user.id,

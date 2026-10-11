@@ -36,6 +36,8 @@ export class AstraService {
     };
   }
   private async requireProject(tx: AstraDb, ownerId: string, projectId: string, action: 'read' | 'write' | 'owner' = 'read'): Promise<void> {
+    const access = await tx.$queryRaw<{blocked: boolean}[]>`SELECT (access_blocked_at IS NOT NULL) AS blocked FROM docgrid."User" WHERE id=${ownerId}`;
+    if (!access[0] || access[0].blocked) throw new ForbiddenException('Доступ к DocGrid заблокирован');
     const rows = await tx.$queryRaw<{ id: string }[]>`SELECT p.id FROM docgrid.workspace_projects p WHERE p.id=${projectId}::uuid AND (p.owner_id=${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId} AND (${action}='read' OR (${action}='write' AND m.role IN ('EDITOR','REVIEWER'))))) FOR UPDATE OF p`;
     if (!rows.length) throw new NotFoundException('Project not found or access denied');
   }
