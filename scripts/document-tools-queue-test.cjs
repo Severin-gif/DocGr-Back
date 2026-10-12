@@ -34,7 +34,7 @@ const {toolInputSchema}=require('../dist/modules/docgrid/document-tools.contract
  await pg.query("UPDATE docgrid.dg_tool_jobs SET state='running',lease_until=now()-interval '1 minute' WHERE id=$1",[encrypted.id]);
  await service.tick();const failed=(await service.list('owner',project)).find(j=>j.id===encrypted.id);assert.equal(failed.state,'failed');assert.equal(writes,0);
  const cleared=(await pg.query('SELECT config FROM docgrid.dg_tool_jobs WHERE id=$1',[encrypted.id])).rows[0].config;assert.equal(cleared.secret,undefined);
- bytes=require('node:child_process').execFileSync('python3',['-c',"import io,sys;from reportlab.pdfgen import canvas;b=io.BytesIO();c=canvas.Canvas(b);c.drawString(50,700,'Worker test');c.save();sys.stdout.buffer.write(b.getvalue())"]);sha=createHash('sha256').update(bytes).digest('hex');
+ bytes=require('node:child_process').execFileSync(process.env.DOCGRID_TOOLS_PYTHON||'python3',['-c',"import io,sys;from reportlab.pdfgen import canvas;b=io.BytesIO();c=canvas.Canvas(b);c.drawString(50,700,'Worker test');c.save();sys.stdout.buffer.write(b.getvalue())"]);sha=createHash('sha256').update(bytes).digest('hex');
  const actual=await service.enqueue('owner',project,input());await service.tick();const completed=(await service.list('owner',project)).find(j=>j.id===actual.id);assert.equal(completed.state,'completed',completed.error);assert.equal(writes,1);assert.equal(completed.result.length,1);
  await pg.close();console.log('Document tools: ACL, validation, stale sources, idempotency, queue quota, encrypted secret and crash recovery passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

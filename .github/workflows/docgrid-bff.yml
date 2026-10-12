@@ -29,7 +29,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run check
       - run: python3 -m venv /tmp/docgrid-tools && /tmp/docgrid-tools/bin/pip install -r scripts/document-tools-requirements.txt
-      - run: npm run build && node scripts/document-tools-queue-test.cjs && /tmp/docgrid-tools/bin/python scripts/document-tools-test.py
+      - run: npm run build && DOCGRID_TOOLS_PYTHON=/tmp/docgrid-tools/bin/python node scripts/document-tools-queue-test.cjs && /tmp/docgrid-tools/bin/python scripts/document-tools-test.py
       - run: npm test
       - run: npm run test:postgres
         env:
