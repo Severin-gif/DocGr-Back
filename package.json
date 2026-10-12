@@ -11,7 +11,8 @@
     "test:domain": "node scripts/recover-docx-migration-test.cjs && node scripts/recover-docx-startup-test.cjs && node scripts/project-slug-migration-test.cjs && node scripts/docgrid-core-test.cjs && node scripts/astra-docgrid-test.cjs && node scripts/docgrid-upload-extraction-test.cjs && node scripts/office-view-test.cjs",
     "db:migrate": "node scripts/migrate.cjs",
     "test:postgres": "node scripts/standalone-http-test.cjs",
-    "test:embedded": "npm run build && node scripts/standalone-http-test.cjs --embedded"
+    "test:embedded": "npm run build && node scripts/standalone-http-test.cjs --embedded",
+    "test:tools": "npm run build && node scripts/document-tools-queue-test.cjs && python3 scripts/document-tools-test.py"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",
@@ -51,4 +52,3 @@
     "node": ">=24"
   }
 }
-

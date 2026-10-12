@@ -1,3 +1,5 @@
+import { DocumentToolsController } from './document-tools.controller';
+import { DocumentToolsService } from './document-tools.service';
 import { DocGridUserAdminController } from './docgrid-user-admin.controller';
 import { DocGridUserAdminService } from './docgrid-user-admin.service';
 import { AiTimeBudgetService } from './ai-time-budget.service';
@@ -29,8 +31,8 @@ import { AstraUploadService } from './astra/astra-upload.service';
 
 @Module({
   imports: [],
-  controllers: [DocGridUserAdminController,FolderSharePublicController,FolderShareOwnerController,CourtPackageController, DiscussionController, DocGridController, DocGridAdminController, AstraAgentController, AstraHumanController],
-  providers: [DocGridUserAdminService,FolderShareService,CourtPackageService,AiTimeBudgetService,ProjectContextService,DocGridOcrService,DiscussionService,DocumentFileService, { provide: S3Service, inject: [ConfigService], useFactory: (config: ConfigService) => new S3Service(new ConfigService(Object.fromEntries(['ENDPOINT', 'BUCKET', 'REGION', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'FORCE_PATH_STYLE'].map(key => [`S3_${key}`, config.get(`DOCGRID_S3_${key}`)])))) }, AgentOAuthCodeStore, DocGridMaterialStorageService, DocGridBackupService, DocGridService, DocGridAdminGuard, DocGridIdentityGuard, AstraAgentGuard, AstraService, AstraSourcesService, AstraWorkflowService, AstraUploadService],
+  controllers: [DocumentToolsController,DocGridUserAdminController,FolderSharePublicController,FolderShareOwnerController,CourtPackageController, DiscussionController, DocGridController, DocGridAdminController, AstraAgentController, AstraHumanController],
+  providers: [DocumentToolsService,DocGridUserAdminService,FolderShareService,CourtPackageService,AiTimeBudgetService,ProjectContextService,DocGridOcrService,DiscussionService,DocumentFileService, { provide: S3Service, inject: [ConfigService], useFactory: (config: ConfigService) => new S3Service(new ConfigService(Object.fromEntries(['ENDPOINT', 'BUCKET', 'REGION', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'FORCE_PATH_STYLE'].map(key => [`S3_${key}`, config.get(`DOCGRID_S3_${key}`)])))) }, AgentOAuthCodeStore, DocGridMaterialStorageService, DocGridBackupService, DocGridService, DocGridAdminGuard, DocGridIdentityGuard, AstraAgentGuard, AstraService, AstraSourcesService, AstraWorkflowService, AstraUploadService],
   exports: [DocGridService, AstraService, AgentOAuthCodeStore],
 })
 export class DocGridModule {}
