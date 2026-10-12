@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocGridService } from './docgrid.service';
 import { CourtPackageService } from './court-package.service';
-import { sourceSchema, ToolInput, toolInputSchema, ToolSource } from './document-tools.contract';
+import { pdfInputSchema, sourceSchema, ToolInput, toolInputSchema, ToolSource } from './document-tools.contract';
 
 type Job={id:string;project_id:string;actor_id:string;tool:string;title:string;config:ToolInput & {secret?:string};state:string;result:unknown[];warnings:string[];error:string|null};
 type EngineResult={error?:string;outputs?:{file:string}[];warnings?:string[];pages?:number;page?:number;image?:string;inputBytes?:number;outputBytes?:number};
@@ -77,6 +77,43 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
     this.previews++;let dir='';
     try{const f=await this.source(user,project,parsed.data);if(extname(f.title).toLowerCase()!=='.pdf'||f.bytes.length>MAX_BYTES)throw new BadRequestException('Предпросмотр поддерживает PDF до 100 МБ');dir=await mkdtemp(join(tmpdir(),'dg-preview-'));const path=join(dir,'source.pdf');await writeFile(path,f.bytes);return await this.engine(dir,{tool:'inspect',files:[{path,title:f.title}],options:{page:body.page}},30000);}
     finally{this.previews--;if(dir)await rm(dir,{recursive:true,force:true});}
+  }
+  private directActive=0;
+  private pdfFiles(files:Array<{originalname:string;buffer:Buffer}>){
+    if(!files?.length||files.length>30||files.reduce((n,f)=>n+f.buffer.length,0)>MAX_BYTES)throw new BadRequestException('Выберите до 30 PDF общим размером не более 100 МБ');
+    for(const file of files)if(!file.originalname.toLowerCase().endsWith('.pdf')||!file.buffer.subarray(0,1024).includes(Buffer.from('%PDF-')))throw new BadRequestException('Поддерживаются только файлы PDF');
+  }
+  private async withPdf(files:Array<{originalname:string;buffer:Buffer}>,tool:string,options:unknown){
+    this.enabled();this.pdfFiles(files);
+    if(this.directActive>=2)throw new ServiceUnavailableException('Обработчик занят. Повторите через несколько секунд');
+    this.directActive++;let dir='';
+    try{
+      dir=await mkdtemp(join(tmpdir(),'dg-pdf-'));const inputs=[];
+      for(const [i,file] of files.entries()){
+        const path=join(dir,`source-${i}.pdf`);await writeFile(path,file.buffer,{mode:0o600});
+        // Multipart browser filenames are UTF-8 bytes decoded as Latin-1 by Multer.
+        const title=/[^\x00-\x7f]/.test(file.originalname)?Buffer.from(file.originalname,'latin1').toString('utf8'):file.originalname;
+        inputs.push({path,title});
+      }
+      const result=await this.engine(dir,{tool,files:inputs,options},tool==='inspect'?30000:75000);
+      if(tool==='inspect')return {preview:result};
+      const output=result.outputs?.[0];
+      if(!output||result.outputs?.length!==1||basename(output.file)!==output.file||!mime[extname(output.file)])throw new BadRequestException('Не удалось создать результат');
+      const bytes=await readFile(join(dir,output.file));if(bytes.length>MAX_BYTES)throw new BadRequestException('Результат превышает 100 МБ');
+      return {file:{bytes,mime:mime[extname(output.file)],extension:extname(output.file)}};
+    }finally{this.directActive--;if(dir)await rm(dir,{recursive:true,force:true});}
+  }
+  async processPdf(files:Array<{originalname:string;buffer:Buffer}>,raw:unknown){
+    const body=raw as {tool?:string;options?:string};let options:unknown;
+    try{options=JSON.parse(body?.options||'{}');}catch{throw new BadRequestException('Некорректные настройки');}
+    this.pdfFiles(files);
+    const parsed=pdfInputSchema.safeParse({tool:body?.tool,count:files.length,options});
+    if(!parsed.success)throw new BadRequestException(parsed.error.issues.map(i=>i.message).join('; '));
+    return (await this.withPdf(files,parsed.data.tool,parsed.data.options)).file!;
+  }
+  async previewPdf(files:Array<{originalname:string;buffer:Buffer}>,page:number){
+    if(files?.length!==1||!Number.isInteger(page)||page<1||page>300)throw new BadRequestException('Выберите один PDF и страницу от 1 до 300');
+    return (await this.withPdf(files,'inspect',{page})).preview!;
   }
   private engine(dir:string,config:unknown,timeout=300000):Promise<EngineResult>{
     return (async()=>{
