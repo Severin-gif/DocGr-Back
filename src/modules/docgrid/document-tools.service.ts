@@ -1,9 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, readFile, writeFile, rm, open, stat } from 'node:fs/promises';
 import { join, extname, resolve, basename } from 'node:path';
 import { tmpdir } from 'node:os';
+import { cleanupExpiredPdfUploads } from './pdf-temporary-files';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocGridService } from './docgrid.service';
 import { CourtPackageService } from './court-package.service';
@@ -11,23 +13,41 @@ import { pdfInputSchema, sourceSchema, ToolInput, toolInputSchema, ToolSource } 
 
 type Job={id:string;project_id:string;actor_id:string;tool:string;title:string;config:ToolInput & {secret?:string};state:string;result:unknown[];warnings:string[];error:string|null};
 type EngineResult={error?:string;outputs?:{file:string}[];warnings?:string[];pages?:number;page?:number;image?:string;inputBytes?:number;outputBytes?:number};
+export type PdfFile={originalname:string;path:string;size:number};
+export type ToolLease={release:()=>void};
 const MAX_BYTES=100*1024*1024;
 const mime:Record<string,string>={'.pdf':'application/pdf','.zip':'application/zip','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'};
 
 @Injectable()
 export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
   private timer?:NodeJS.Timeout;
+  private cleanupTimer?:NodeJS.Timeout;
+  private cleanupActive?:Promise<void>;
   private active?:Promise<void>;
-  private previews=0;
+  private readonly operations=new Set<ToolLease>();
+  acquireOperation():ToolLease {
+    this.enabled();
+    const lease=this.tryAcquireOperation();
+    if(!lease)throw new ServiceUnavailableException('Обработчик занят. Повторите через несколько секунд');
+    return lease;
+  }
+  private tryAcquireOperation():ToolLease|undefined {
+    if(this.stopped||this.operations.size>=2)return;
+    const lease={release:()=>{this.operations.delete(lease);}};
+    this.operations.add(lease);return lease;
+  }
   private stopped=false;
   private readonly logger=new Logger('DocumentTools');
   constructor(private readonly db:PrismaService,private readonly grid:DocGridService,private readonly packages:CourtPackageService){}
   onModuleInit(){
-    if(process.env.NODE_ENV==='test'||process.env.DOCGRID_TOOLS_ENABLED==='false')return;
+    if(process.env.NODE_ENV==='test')return;
+    const cleanup=()=>{if(!this.cleanupActive)this.cleanupActive=cleanupExpiredPdfUploads().catch(()=>this.logger.warn('PDF temporary directory cleanup failed')).finally(()=>{this.cleanupActive=undefined;});};
+    cleanup();this.cleanupTimer=setInterval(cleanup,60000);this.cleanupTimer.unref();
+    if(process.env.DOCGRID_TOOLS_ENABLED==='false')return;
     this.timer=setInterval(()=>{if(!this.active&&!this.stopped)this.active=this.tick().catch(()=>this.logger.warn('Document tools queue unavailable')).finally(()=>{this.active=undefined;});},2500);
     this.timer.unref();
   }
-  async onModuleDestroy(){this.stopped=true;if(this.timer)clearInterval(this.timer);await this.active;}
+  async onModuleDestroy(){this.stopped=true;if(this.timer)clearInterval(this.timer);if(this.cleanupTimer)clearInterval(this.cleanupTimer);await Promise.all([this.active,this.cleanupActive]);}
   private enabled(){if(process.env.DOCGRID_TOOLS_ENABLED==='false')throw new ServiceUnavailableException('Инструменты временно отключены');}
   private async access(db:PrismaService|any,user:string,project:string,write=false){
     const rows=await db.$queryRaw`SELECT p.id FROM docgrid.workspace_projects p WHERE p.id=${project}::uuid AND (p.owner_id=${user} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${user} AND (${!write} OR m.role IN ('EDITOR','REVIEWER'))))`;
@@ -73,55 +93,63 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
     this.enabled();await this.access(this.db,user,project);
     const body=raw as {source?:unknown;page?:number};const parsed=sourceSchema.safeParse(body?.source);
     if(!parsed.success||!Number.isInteger(body.page)||body.page!<1||body.page!>300)throw new BadRequestException('Выберите файл и страницу');
-    if(this.previews>=2)throw new ServiceUnavailableException('Предпросмотр занят. Повторите через несколько секунд');
-    this.previews++;let dir='';
+    const lease=this.acquireOperation();let dir='';
     try{const f=await this.source(user,project,parsed.data);if(extname(f.title).toLowerCase()!=='.pdf'||f.bytes.length>MAX_BYTES)throw new BadRequestException('Предпросмотр поддерживает PDF до 100 МБ');dir=await mkdtemp(join(tmpdir(),'dg-preview-'));const path=join(dir,'source.pdf');await writeFile(path,f.bytes);return await this.engine(dir,{tool:'inspect',files:[{path,title:f.title}],options:{page:body.page}},30000);}
-    finally{this.previews--;if(dir)await rm(dir,{recursive:true,force:true});}
+    finally{try{if(dir)await rm(dir,{recursive:true,force:true});}finally{lease.release();}}
   }
-  private directActive=0;
-  private pdfFiles(files:Array<{originalname:string;buffer:Buffer}>){
-    if(!files?.length||files.length>30||files.reduce((n,f)=>n+f.buffer.length,0)>MAX_BYTES)throw new BadRequestException('Выберите до 30 PDF общим размером не более 100 МБ');
-    for(const file of files)if(!file.originalname.toLowerCase().endsWith('.pdf')||!file.buffer.subarray(0,1024).includes(Buffer.from('%PDF-')))throw new BadRequestException('Поддерживаются только файлы PDF');
+  private async pdfFiles(files:PdfFile[]){
+    if(!files?.length||files.length>30||files.reduce((n,f)=>n+f.size,0)>MAX_BYTES)throw new BadRequestException('Выберите до 30 PDF общим размером не более 100 МБ');
+    for(const file of files){
+      const handle=await open(file.path,'r');
+      try{
+        const header=Buffer.alloc(1024);const {bytesRead}=await handle.read(header,0,1024,0);
+        if(!file.originalname.toLowerCase().endsWith('.pdf')||!header.subarray(0,bytesRead).includes(Buffer.from('%PDF-')))throw new BadRequestException('Поддерживаются только файлы PDF');
+      }finally{await handle.close();}
+    }
   }
-  private async withPdf(files:Array<{originalname:string;buffer:Buffer}>,tool:string,options:unknown){
-    this.enabled();this.pdfFiles(files);
-    if(this.directActive>=2)throw new ServiceUnavailableException('Обработчик занят. Повторите через несколько секунд');
-    this.directActive++;let dir='';
-    try{
-      dir=await mkdtemp(join(tmpdir(),'dg-pdf-'));const inputs=[];
-      for(const [i,file] of files.entries()){
-        const path=join(dir,`source-${i}.pdf`);await writeFile(path,file.buffer,{mode:0o600});
-        // Multipart browser filenames are UTF-8 bytes decoded as Latin-1 by Multer.
-        const title=/[^\x00-\x7f]/.test(file.originalname)?Buffer.from(file.originalname,'latin1').toString('utf8'):file.originalname;
-        inputs.push({path,title});
-      }
-      const result=await this.engine(dir,{tool,files:inputs,options},tool==='inspect'?30000:75000);
-      if(tool==='inspect')return {preview:result};
-      const output=result.outputs?.[0];
-      if(!output||result.outputs?.length!==1||basename(output.file)!==output.file||!mime[extname(output.file)])throw new BadRequestException('Не удалось создать результат');
-      const bytes=await readFile(join(dir,output.file));if(bytes.length>MAX_BYTES)throw new BadRequestException('Результат превышает 100 МБ');
-      return {file:{bytes,mime:mime[extname(output.file)],extension:extname(output.file)}};
-    }finally{this.directActive--;if(dir)await rm(dir,{recursive:true,force:true});}
+  private async withPdf(files:PdfFile[],tool:string,options:unknown,lease:ToolLease,signal?:AbortSignal){
+    this.enabled();
+    if(!this.operations.has(lease))throw new ServiceUnavailableException('Резервирование обработки истекло');
+    signal?.throwIfAborted();await this.pdfFiles(files);
+    // The upload interceptor owns the directory and lease through processing and cleanup.
+    const dir=resolve(files[0].path,'..');
+    const inputs=files.map(file=>({path:file.path,title:/[^\x00-\x7f]/.test(file.originalname)?Buffer.from(file.originalname,'latin1').toString('utf8'):file.originalname}));
+    const result=await this.engine(dir,{tool,files:inputs,options},tool==='inspect'?30000:75000,signal);
+    if(tool==='inspect')return {preview:result};
+    const output=result.outputs?.[0];
+    if(!output||result.outputs?.length!==1||basename(output.file)!==output.file||!mime[extname(output.file)])throw new BadRequestException('Не удалось создать результат');
+    const path=join(dir,output.file);
+    if((await stat(path)).size>MAX_BYTES)throw new BadRequestException('Результат превышает 100 МБ');
+    return {file:{stream:createReadStream(path),mime:mime[extname(output.file)],extension:extname(output.file)}};
   }
-  async processPdf(files:Array<{originalname:string;buffer:Buffer}>,raw:unknown){
+  async processPdf(files:PdfFile[],raw:unknown,lease:ToolLease,signal?:AbortSignal){
     const body=raw as {tool?:string;options?:string};let options:unknown;
     try{options=JSON.parse(body?.options||'{}');}catch{throw new BadRequestException('Некорректные настройки');}
-    this.pdfFiles(files);
-    const parsed=pdfInputSchema.safeParse({tool:body?.tool,count:files.length,options});
+    const parsed=pdfInputSchema.safeParse({tool:body?.tool,count:files?.length,options});
     if(!parsed.success)throw new BadRequestException(parsed.error.issues.map(i=>i.message).join('; '));
-    return (await this.withPdf(files,parsed.data.tool,parsed.data.options)).file!;
+    return (await this.withPdf(files,parsed.data.tool,parsed.data.options,lease,signal)).file!;
   }
-  async previewPdf(files:Array<{originalname:string;buffer:Buffer}>,page:number){
+  async previewPdf(files:PdfFile[],page:number,lease:ToolLease,signal?:AbortSignal){
     if(files?.length!==1||!Number.isInteger(page)||page<1||page>300)throw new BadRequestException('Выберите один PDF и страницу от 1 до 300');
-    return (await this.withPdf(files,'inspect',{page})).preview!;
+    return (await this.withPdf(files,'inspect',{page},lease,signal)).preview!;
   }
-  private engine(dir:string,config:unknown,timeout=300000):Promise<EngineResult>{
+  private engine(dir:string,config:unknown,timeout=300000,signal?:AbortSignal):Promise<EngineResult>{
     return (async()=>{
+      signal?.throwIfAborted();
       const input=join(dir,'input.json');await writeFile(input,JSON.stringify(config),{mode:0o600});
       return new Promise<EngineResult>((resolveResult,reject)=>{
+        signal?.throwIfAborted();
         const child=spawn(process.env.DOCGRID_TOOLS_PYTHON||'python3',[resolve('scripts/document-tools.py'),input],{detached:true,stdio:['ignore','pipe','pipe']});
         let output='',done=false;
-        const finish=(error?:Error,result?:EngineResult)=>{if(done)return;done=true;clearTimeout(timer);try{process.kill(-child.pid!,'SIGKILL');}catch{}error?reject(error):resolveResult(result!);};
+        const finish=(error?:Error,result?:EngineResult)=>{
+          if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);
+          try{process.kill(-child.pid!,'SIGKILL');}catch{}
+          const settle=()=>error?reject(error):resolveResult(result!);
+          // Do not return the shared slot until the killed worker has actually closed.
+          if(child.exitCode===null&&child.signalCode===null)child.once('close',settle);else settle();
+        };
+        const abort=()=>finish(new BadRequestException('Запрос отменён'));
+        signal?.addEventListener('abort',abort,{once:true});
         const timer=setTimeout(()=>finish(new BadRequestException('Превышено время обработки. Разделите файл на части.')),timeout);
         child.stdout.on('data',b=>{output+=b.toString();if(output.length>3*1024*1024)finish(new BadRequestException('Результат обработки слишком велик'));});
         child.stderr.on('data',()=>{});child.on('error',()=>finish(new ServiceUnavailableException('Обработчик документов недоступен')));
@@ -130,6 +158,10 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
     })();
   }
   async tick(){
+    const lease=this.tryAcquireOperation();if(!lease)return;
+    try{await this.tickReserved();}finally{lease.release();}
+  }
+  private async tickReserved(){
     const job=await this.db.$transaction(async tx=>{
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(29140002)`;
       // A crashed job is failed, never silently rerun after possibly storing a result.

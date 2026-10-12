@@ -35,6 +35,22 @@ const {toolInputSchema}=require('../dist/modules/docgrid/document-tools.contract
  await service.tick();const failed=(await service.list('owner',project)).find(j=>j.id===encrypted.id);assert.equal(failed.state,'failed');assert.equal(writes,0);
  const cleared=(await pg.query('SELECT config FROM docgrid.dg_tool_jobs WHERE id=$1',[encrypted.id])).rows[0].config;assert.equal(cleared.secret,undefined);
  bytes=require('node:child_process').execFileSync(process.env.DOCGRID_TOOLS_PYTHON||'python3',['-c',"import io,sys;from reportlab.pdfgen import canvas;b=io.BytesIO();c=canvas.Canvas(b);c.drawString(50,700,'Worker test');c.save();sys.stdout.buffer.write(b.getvalue())"]);sha=createHash('sha256').update(bytes).digest('hex');
- const actual=await service.enqueue('owner',project,input());await service.tick();const completed=(await service.list('owner',project)).find(j=>j.id===actual.id);assert.equal(completed.state,'completed',completed.error);assert.equal(writes,1);assert.equal(completed.result.length,1);
+ const actual=await service.enqueue('owner',project,input());
+ // Shared capacity: full direct/preview slots leave the existing job queued.
+ const engine=service.engine.bind(service);let startPreview,finishPreview,startWorker,finishWorker;
+ const previewStarted=new Promise(r=>startPreview=r),previewGate=new Promise(r=>finishPreview=r);
+ const workerStarted=new Promise(r=>startWorker=r),workerGate=new Promise(r=>finishWorker=r);
+ service.engine=async(...args)=>{if(args[1].tool==='inspect'){startPreview();await previewGate;}else{startWorker();await workerGate;}return engine(...args);};
+ const directLease=service.acquireOperation();
+ const preview=service.inspect('owner',project,{source:input().sources[0],page:1});await previewStarted;
+ await service.tick();assert.equal((await service.list('owner',project)).find(j=>j.id===actual.id).state,'queued');assert.equal(writes,0);
+ directLease.release();
+ // Project preview + worker consume the common two slots. No third upload/preview.
+ const worker=service.tick();await workerStarted;
+ assert.throws(()=>service.acquireOperation(),/занят/);
+ await assert.rejects(()=>service.inspect('owner',project,{source:input().sources[0],page:1}),/занят/);
+ await service.tick();finishWorker();await worker;
+ finishPreview();assert.equal((await preview).pages,1);service.engine=engine;
+ const freeA=service.acquireOperation(),freeB=service.acquireOperation();freeA.release();freeB.release();const completed=(await service.list('owner',project)).find(j=>j.id===actual.id);assert.equal(completed.state,'completed',completed.error);assert.equal(writes,1);assert.equal(completed.result.length,1);
  await pg.close();console.log('Document tools: ACL, validation, stale sources, idempotency, queue quota, encrypted secret and crash recovery passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
