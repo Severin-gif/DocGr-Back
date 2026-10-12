@@ -90,10 +90,13 @@ def ocr_pdf(path, directory, languages):
     source = reader(path); w = PdfWriter()
     for i, p in enumerate(source.pages):
         if (p.extract_text() or '').strip(): w.add_page(p); continue
-        im = image_page(path, i, directory, 200); png = directory / 'ocr.png'; im.save(png)
+        im = image_page(path, i, directory, 200); png = directory / 'ocr.png'; im.save(png,dpi=(200,200))
         prefix = str(directory / 'ocr-result')
-        run(['tesseract', str(png), prefix, '-l', languages, 'pdf'], timeout=60)
-        w.add_page(PdfReader(prefix+'.pdf').pages[0])
+        run(['tesseract', str(png), prefix, '--dpi', '200', '-l', languages, 'pdf'], timeout=60)
+        recognized=PdfReader(prefix+'.pdf').pages[0]
+        width,height=float(p.mediabox.width),float(p.mediabox.height)
+        if p.rotation % 180:width,height=height,width
+        recognized.scale_to(width,height);w.add_page(recognized)
     out=directory/'searchable.pdf'; save_pdf(w,out); return out
 
 def process(config, directory):

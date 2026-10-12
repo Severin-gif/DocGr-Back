@@ -48,7 +48,7 @@ class ToolsTest(unittest.TestCase):
         _,p=self.call('ocr');self.assertIn('Договор',PdfReader(p).pages[0].extract_text())
     def test_scan_ocr(self):
         img=engine.image_page(self.pdf,0,self.root,180);scan=self.root/'scan.pdf';engine.image_pdf([img],scan)
-        _,p=self.call('ocr',{'languages':'eng'},[scan]);self.assertIn('SECRET',PdfReader(p).pages[0].extract_text())
+        _,p=self.call('ocr',{'languages':'eng'},[scan]);self.assertIn('SECRET',PdfReader(p).pages[0].extract_text());self.assertAlmostEqual(float(PdfReader(p).pages[0].mediabox.width),595,places=1);self.assertAlmostEqual(float(PdfReader(p).pages[0].mediabox.height),842,places=1)
     def test_docx_conversion(self):
         doc=Document();doc.add_paragraph('Document contract 123');source=self.root/'contract.docx';doc.save(source)
         _,p=self.call('docx-pdf',files=[source]);self.assertIn('contract',PdfReader(p).pages[0].extract_text())
