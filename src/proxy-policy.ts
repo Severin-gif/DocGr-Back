@@ -14,6 +14,8 @@ type Rule = {
 export type RouteRule = { body: BodyKind; response: ResponseKind; query?: Set<string> };
 
 const rules: Rule[] = [
+  { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/tools/jobs$`) },
+  { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/tools/(?:jobs|inspect)$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/artifacts$`), query: new Set(["cursor"]) },
   // Human control plane. Agent credentials are rejected by the identity verifier.
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/catalog$`) },

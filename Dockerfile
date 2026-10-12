@@ -11,7 +11,10 @@ RUN npm run build
 FROM node:24-bookworm-slim AS production
 WORKDIR /app
 ENV NODE_ENV=production PORT=4000
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3 python3-xlrd python3-openpyxl python3-lxml antiword util-linux libreoffice-writer fonts-dejavu-core postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3 python3-venv ghostscript python3-xlrd python3-openpyxl python3-lxml antiword util-linux libreoffice-writer fonts-dejavu-core postgresql-client && rm -rf /var/lib/apt/lists/*
+COPY scripts/document-tools-requirements.txt /tmp/document-tools-requirements.txt
+RUN python3 -m venv /opt/docgrid-tools && /opt/docgrid-tools/bin/pip install --no-cache-dir -r /tmp/document-tools-requirements.txt
+ENV DOCGRID_TOOLS_PYTHON=/opt/docgrid-tools/bin/python
 COPY package*.json ./
 COPY prisma ./prisma
 RUN npm ci --omit=dev --no-audit --no-fund && npx prisma generate && npm cache clean --force
