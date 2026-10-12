@@ -44,6 +44,9 @@ const { DocGridService } = require(
   await pg.exec("ALTER TABLE docgrid.docgrid_materials ADD COLUMN extraction_reason text");
   await pg.exec(fs.readFileSync("prisma/migrations/20261008100000_shared_folders/migration.sql", "utf8"));
   await pg.exec(fs.readFileSync("prisma/migrations/20261008174500_document_docx_structure/migration.sql", "utf8"));
+  for (const migration of ['20261011210000_project_slugs', '20261012070000_project_slug_rollout']) {
+    await pg.exec(fs.readFileSync(`prisma/migrations/${migration}/migration.sql`, 'utf8'));
+  }
   function adapter(client) {
     const query = async (strings, ...values) =>
       client.query(
@@ -56,11 +59,13 @@ const { DocGridService } = require(
     };
     db.$transaction = (fn) => client.transaction((tx) => fn(adapter(tx)));
     db.workspaceProject = {
+      findUnique: async ({ where }) =>
+        (await client.query('SELECT id FROM docgrid.workspace_projects WHERE slug=$1', [where.slug])).rows[0] ?? null,
       create: async ({ data: d }) =>
         (
           await client.query(
-            'INSERT INTO docgrid.workspace_projects(owner_id,name,description) VALUES($1,$2,$3) RETURNING id,name,description,created_at AS "createdAt",updated_at AS "updatedAt"',
-            [d.ownerId, d.name, d.description],
+            'INSERT INTO docgrid.workspace_projects(owner_id,name,description,slug) VALUES($1,$2,$3,$4) RETURNING id,slug,name,description,created_at AS "createdAt",updated_at AS "updatedAt"',
+            [d.ownerId, d.name, d.description, d.slug],
           )
         ).rows[0],
     };
@@ -84,6 +89,14 @@ const { DocGridService } = require(
   }
   const service = new DocGridService(adapter(pg));
   const project = await service.createRepository("owner", { name: "Case" });
+  assert.equal(project.slug, 'case');
+  const sameName = await service.createRepository('owner', { name: 'Case' });
+  assert.match(sameName.slug, /^case--[0-9a-f]{8}$/);
+  assert.notEqual(sameName.id, project.id);
+  const cyrillic = await service.createRepository('owner', { name: '  Тимаева  ' });
+  assert.equal(cyrillic.slug, 'timaeva');
+  assert.equal((await pg.query('SELECT slug FROM docgrid.workspace_projects WHERE id=$1', [cyrillic.id])).rows[0].slug, cyrillic.slug);
+  console.log('PASS repository creation persists slug, equal names remain unique, Cyrillic names normalize');
   const doc = await service.createArtifact("owner", project.id, {
     title: "Agreement",
     content: "a\nb\nc",
