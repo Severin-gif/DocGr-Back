@@ -14,6 +14,8 @@ type Rule = {
 export type RouteRule = { body: BodyKind; response: ResponseKind; query?: Set<string> };
 
 const rules: Rule[] = [
+  { method: "POST", pattern: /^\/api\/docgrid\/tools\/process$/, body: "multipart", response: "binary" },
+  { method: "POST", pattern: /^\/api\/docgrid\/tools\/preview$/, body: "multipart" },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/tools/jobs$`) },
   { method: "POST", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/tools/(?:jobs|inspect)$`) },
   { method: "GET", pattern: new RegExp(`^/api/docgrid/repositories/${UUID}/(?:agents|astra)/artifacts$`), query: new Set(["cursor"]) },

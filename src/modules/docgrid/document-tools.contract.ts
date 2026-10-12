@@ -14,14 +14,17 @@ const optionsSchema = z.object({
   text:z.string().trim().min(1).max(100).optional(),opacity:z.number().min(.05).max(.8).optional(),password:z.string().min(8).max(128).optional(),
   format:z.enum(['pdf','zip']).optional(),inventory:z.boolean().optional(),number:z.boolean().optional(),
 }).strict();
-export const toolInputSchema=z.object({requestId:z.string().uuid(),tool:z.enum(toolNames),title:z.string().trim().min(1).max(100),path:z.string().max(500).default('/Инструменты'),sources:z.array(sourceSchema).min(1).max(30),options:optionsSchema.default({})}).strict().superRefine((v,ctx)=>{
+function validateOperation(v:{tool:typeof toolNames[number];options:z.infer<typeof optionsSchema>;count:number},ctx:z.RefinementCtx){
   const multiple=['merge','images-pdf','bundle'];
-  if(v.tool==='compare'?v.sources.length!==2:!multiple.includes(v.tool)&&v.sources.length!==1)ctx.addIssue({code:'custom',message:'Недопустимое число исходных файлов'});
-  if(v.tool==='merge'&&v.sources.length<2)ctx.addIssue({code:'custom',message:'Выберите минимум два файла'});
+  if(v.tool==='compare'?v.count!==2:!multiple.includes(v.tool)&&v.count!==1)ctx.addIssue({code:'custom',message:'Недопустимое число исходных файлов'});
+  if(v.tool==='merge'&&v.count<2)ctx.addIssue({code:'custom',message:'Выберите минимум два файла'});
   if(v.tool==='protect'&&!v.options.password)ctx.addIssue({code:'custom',message:'Задайте пароль от 8 символов'});
   if(v.tool==='watermark'&&!v.options.text)ctx.addIssue({code:'custom',message:'Введите водяной знак'});
   if(v.tool==='redact'&&!v.options.terms?.trim()&&!v.options.rects?.length)ctx.addIssue({code:'custom',message:'Выделите области или укажите текст для удаления'});
   if(v.tool==='pages'&&v.options.mode==='delete'&&!v.options.pages?.trim())ctx.addIssue({code:'custom',message:'Выберите страницы для удаления'});
-});
+}
+export const toolInputSchema=z.object({requestId:z.string().uuid(),tool:z.enum(toolNames),title:z.string().trim().min(1).max(100),path:z.string().max(500).default('/Инструменты'),sources:z.array(sourceSchema).min(1).max(30),options:optionsSchema.default({})}).strict().superRefine((v,ctx)=>validateOperation({...v,count:v.sources.length},ctx));
+export const pdfInputSchema=z.object({tool:z.enum(toolNames).refine(t=>t!=='docx-pdf'&&t!=='images-pdf','Поддерживаются только операции с PDF'),count:z.number().int().min(1).max(30),options:optionsSchema.default({})}).strict().superRefine(validateOperation);
+
 export type ToolInput=z.infer<typeof toolInputSchema>;
 export type ToolSource=z.infer<typeof sourceSchema>;

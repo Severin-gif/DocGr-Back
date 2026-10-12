@@ -122,3 +122,11 @@ test("canonical DOCX files and recovery drafts are binary and reject unsafe form
   assert.equal(resolveDocGridRoute('GET',path,new URLSearchParams('revision=1&format=html')),null);
   assert.equal(resolveDocGridRoute('POST',`/api/docgrid/repositories/${P}/document-draft.docx`,new URLSearchParams())?.response,'binary');
 });
+
+test("standalone PDF routes need no project and preserve multipart/binary",()=>{
+  const q=new URLSearchParams();
+  assert.equal(resolveDocGridRoute("POST","/api/docgrid/tools/process",q)?.body,"multipart");
+  assert.equal(resolveDocGridRoute("POST","/api/docgrid/tools/process",q)?.response,"binary");
+  assert.equal(resolveDocGridRoute("POST","/api/docgrid/tools/preview",q)?.response,"json");
+  assert.equal(isAllowedDocGridRequest("GET","/api/docgrid/tools/process",q),false);
+});
