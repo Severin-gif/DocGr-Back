@@ -1,3 +1,4 @@
+import { workflowEnvironment } from './discussion-workflow.protocol';
 import { AiTimeBudgetService } from './ai-time-budget.service';
 import { ProjectContextService } from './project-context.service';
 import { LEGAL_INSTRUCTION_FOLDER, instructionDocument, resolveDiscussionTask, validateLegalInstructionResponse } from './legal-instruction.protocol';
@@ -68,19 +69,22 @@ export class DiscussionService {
     await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET status='failed',error='Запрос прерван. Отправьте сообщение повторно.',updated_at=now() WHERE discussion_id=${id}::uuid AND status='running' AND updated_at<now()-interval '10 minutes'`;
     return this.db.$queryRaw<any[]>`SELECT id,instruction,mode,status,result,context,provider,error,proposal_id AS "proposalId",created_at AS "createdAt" FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid ORDER BY created_at,id LIMIT 200`;
   }
-  async send(user:string,project:string,id:string,raw:unknown){
+  async send(user:string,project:string,id:string,raw:unknown,workflowId?:string){
     const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query','model']);
     const requestKey=stringInput(r,'requestKey',120),instruction=stringInput(r,'instruction',8000),mode=stringInput(r,'mode',20) as DiscussionMode;
     if(!['advisor','helper','assistant'].includes(mode))throw new BadRequestException('Неизвестный режим');
     const task=stringInput(r,'task',20,false)||'chat';if(!['chat','sort','package','instruction'].includes(task)||(mode==='advisor'&&['package','instruction'].includes(task)))throw new BadRequestException('Задача недоступна в этом режиме');
     const model=stringInput(r,'model',100,false)||'default';
     const offset=integerInput(r,'offset',0,5000,0),query=stringInput(r,'query',200,false);
-    const folder=r.folder===undefined?null:stringInput(r,'folder',500);
+    const environment=workflowEnvironment(r,!!workflowId);
+    const folder=environment.folder;
     if(r.sourceIds!==undefined&&(!Array.isArray(r.sourceIds)||r.sourceIds.length>500))throw new BadRequestException('Слишком много выбранных файлов');
     const selected=r.sourceIds===undefined?null:(r.sourceIds as unknown[]).map(sourceId=>uuidInput({sourceId},'sourceId'));
     const thread=await this.thread(user,project,id),bodyDigest=digest(r),turnId=randomUUID();
     const prior=await this.db.$transaction(async tx=>{
       await tx.$queryRaw`SELECT id FROM docgrid.dg_discussions WHERE id=${id}::uuid FOR UPDATE`;
+      const workflows=await tx.$queryRaw<any[]>`SELECT id FROM docgrid.dg_discussion_workflows WHERE discussion_id=${id}::uuid AND status IN ('planning','running','cancelling')`;
+      if(workflows.some(w=>w.id!==workflowId))throw new ConflictException('Дождитесь выполнения этапа');
       const existing=await tx.$queryRaw<any[]>`SELECT * FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND request_key=${requestKey}`;
       if(existing[0]){if(existing[0].body_digest!==bodyDigest)throw new ConflictException('Ключ запроса уже использован');return existing[0];}
       const running=await tx.$queryRaw<any[]>`SELECT id FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='running'`;
@@ -108,7 +112,7 @@ export class DiscussionService {
       const sources:ChatSource[]=[],refs:any[]=[],coverage:any[]=[];
       let retrieval:any=null,batch:any[]=[],used=0;
       // Rank passages over the entire authorized snapshot; the model receives a bounded evidence bundle.
-      if(query || task!=='sort') {
+      if(candidates.length && (query || task!=='sort')) {
         const searchQuery=query || instruction.slice(0,200);
         const args={snapshotId,query:searchQuery,mode:'ranked',limit:50,...(selected===null?{}:{sourceIds:selected}),...(folder?{path:folder}:{})};
         let hit=await call('docgrid_search',args),rounds=0;
@@ -138,10 +142,16 @@ export class DiscussionService {
         for(const s of batch){const read=await call('docgrid_read_source',{sourceRef:s.sourceRef,maxChars:5000});sources.push({id:s.sourceId,title:s.title,path:s.path,text:read.text,status:read.truncated?'PARTIAL':read.status});refs.push(s.sourceRef);coverage.push({sourceId:s.sourceId,title:s.title,path:s.path,status:read.status,truncated:read.truncated,characters:read.text.length,sourceRef:s.sourceRef});}
         if(retrieval)retrieval.fallback='first-source-sample-no-search-hits';
       }
-      const projectContext=await this.memory.context(project,manifest.map(s=>s.sourceId));
-      const context={projectContext,task,snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
+      const projectContext=await this.memory.context(project,candidates.map(s=>s.sourceId));
+      const context={workflowId:workflowId||null,workflowStage:workflowId?(requestKey.endsWith(':plan')?'plan':'step'):null,environment,candidateIds:candidates.map(s=>s.sourceId).slice(0,501),projectContext,task,snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
       await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET context=${JSON.stringify(context)}::jsonb WHERE id=${turnId}::uuid`;
-      const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' ORDER BY created_at DESC LIMIT 200`;
+      const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' AND (
+        (${workflowId||''}<>'' AND context->>'workflowId'=${workflowId||''}) OR
+        (${workflowId||''}='' AND (
+          ${selected===null&&folder==='/'} OR context->'environment'=${JSON.stringify(environment)}::jsonb OR
+          ((context->>'total')::int<=500 AND context->'candidateIds'<@${JSON.stringify(candidates.map(s=>s.sourceId))}::jsonb)
+        ))
+      ) ORDER BY created_at DESC LIMIT 200`;
       const token=process.env.DOCGRID_SERVICE_TOKEN||'',base=process.env.DOCGRID_ORCHESTRA_URL||'';
       if(token.length<32||!base)throw new ServiceUnavailableException('Настройте DOCGRID_ORCHESTRA_URL и DOCGRID_SERVICE_TOKEN в Doc-Back');
       const url=new URL(base);if(!['https:','http:'].includes(url.protocol)||url.username||url.password)throw new ServiceUnavailableException('Некорректный адрес AI-Orchestra');

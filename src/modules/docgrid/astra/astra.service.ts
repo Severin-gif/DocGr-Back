@@ -203,7 +203,7 @@ export class AstraService {
       await this.requireProject(tx,user,project);
       const settings=await tx.$queryRaw<any[]>`SELECT builtin_enabled FROM docgrid.dg_ai_settings WHERE project_id=${project}::uuid`;
       if(settings[0]?.builtin_enabled===false)throw new ForbiddenException('Встроенная LLM отключена владельцем проекта');
-      const actions=['docgrid_get_snapshot','docgrid_read_source','docgrid_search','docgrid_propose_structure','docgrid_propose_package'];
+      const actions=['docgrid_get_snapshot','docgrid_read_source','docgrid_search','docgrid_propose_structure','docgrid_propose_package','docgrid_plan_document'];
       const id=randomUUID(), requestKey='builtin:'+id, expiresAt=new Date(Date.now()+30*86400000);
       const tokenHash=createHash('sha256').update(randomBytes(32)).digest('hex');
       await tx.$executeRaw`INSERT INTO docgrid.dg_astra_grants(id,project_id,owner_id,agent_ref,token_hash,actions,expires_at,max_operations,request_key,body_digest,builtin) VALUES(${id}::uuid,${project}::uuid,${user},'Встроенная LLM',${tokenHash},${JSON.stringify(actions)}::jsonb,${expiresAt},10000,${requestKey},${digest({user,project,id})},true)`;

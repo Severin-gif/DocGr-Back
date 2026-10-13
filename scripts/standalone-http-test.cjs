@@ -40,6 +40,8 @@ async function run(args) {
   const upload=await fetch(base+prefix+'/materials',{method:'POST',headers:{authorization:'Bearer '+jwt('owner')},body:form});const material=await upload.json();assert.equal(upload.status,201,JSON.stringify(material));
   const download=await fetch(base+prefix+'/materials/'+material.id+'/download',{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(download.status,200);assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
   await call(prefix+'/materials/'+material.id+'/download','GET',undefined,jwt('stranger'),404);
+  if(process.argv.includes('--discussions-only')){await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
+  if(process.argv.includes('--workflows-only')){await require('./discussion-workflow-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   await require('./folder-share-acceptance.cjs')({call,jwt,base,db});
   await require('./external-corpus-acceptance.cjs')({call,jwt,base,db});
   if(process.argv.includes('--shares-only')){clearTimeout(timeout);passed=true;return;}

@@ -208,6 +208,11 @@ export class AstraWorkflowService {
     if (binding.plan_revision !== integerInput(input, 'planRevision', 1, 2147483647) || binding.plan_digest !== stringInput(input, 'planDigest', 64)) {
       throw new ConflictException('STALE_PLAN');
     }
+    const task = await tx.documentTask.findUnique({where:{id:binding.task_id}});
+    const taskPlan = task?.plan as Record<string,unknown> | undefined;
+    if(typeof taskPlan?.requestedResult==='string' && taskPlan.requestedResult.startsWith('discussion-workflow:')) {
+      throw new ConflictException('Discussion plan approval does not authorize document submission; propose changes separately');
+    }
     const content = this.normalizeContent(input.content);
     await this.sources.validateSourceRefs(tx, ctx, binding.source_snapshot_id, binding.source_refs);
     const document = await tx.preparedLegalDocument.create({ data: { ownerId: ctx.ownerId, title: content.title, currentVersion: 0, nextVersion: 1 } });
