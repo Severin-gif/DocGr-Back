@@ -16,9 +16,20 @@ async function run(args) {
   assert.ok(process.env.DATABASE_URL,'Use an isolated docgrid_test database');
   const url=new URL(process.env.DATABASE_URL);
   if(!embedded)assert.match(url.pathname,/^\/docgrid_test[a-z0-9_-]*$/i);
-  url.searchParams.set('schema','docgrid');url.searchParams.set('connection_limit','1');process.env.DATABASE_URL=url.toString();
+  url.searchParams.set('schema','docgrid_live');url.searchParams.set('connection_limit','1');process.env.DATABASE_URL=url.toString();
   const {Client}=require('pg');const check=new Client({connectionString:process.env.DATABASE_URL});await check.connect();
-  assert.equal((await check.query("SELECT to_regclass('docgrid.workspace_projects') AS t")).rows[0].t,null);await check.end();
+  assert.equal((await check.query("SELECT to_regclass('docgrid_live.workspace_projects') AS t")).rows[0].t,null);
+  if(process.argv.includes('--fresh-only')) {
+   assert.ok(embedded,'Fresh schema test requires an isolated embedded database');
+   await check.query(`CREATE ROLE legacy_owner; CREATE SCHEMA docgrid AUTHORIZATION legacy_owner;
+    CREATE TABLE docgrid.docgrid_branch_documents(id text PRIMARY KEY,content text);
+    INSERT INTO docgrid.docgrid_branch_documents VALUES('legacy','Keep this document');
+    ALTER TABLE docgrid.docgrid_branch_documents OWNER TO legacy_owner;
+    CREATE TABLE docgrid._prisma_migrations(id text,migration_name text,finished_at timestamptz,rolled_back_at timestamptz);
+    INSERT INTO docgrid._prisma_migrations VALUES('legacy-failure','20261008174500_document_docx_structure',NULL,NULL);
+    ALTER TABLE docgrid._prisma_migrations OWNER TO legacy_owner;`);
+  }
+  await check.end();
   await run(['scripts/migrate.cjs']);await run(['scripts/migrate.cjs']);
   process.env.NODE_ENV='test';process.env.DOCGRID_IDENTITY_JWT_SECRET='a'.repeat(64);process.env.DOCGRID_SERVICE_TOKEN='b'.repeat(64);process.env.DOCGRID_MATERIAL_STORAGE='database';delete process.env.LEGAL_CORE_URL;
   const {PrismaService}=require('../dist/prisma/prisma.service');
@@ -40,6 +51,17 @@ async function run(args) {
   const upload=await fetch(base+prefix+'/materials',{method:'POST',headers:{authorization:'Bearer '+jwt('owner')},body:form});const material=await upload.json();assert.equal(upload.status,201,JSON.stringify(material));
   const download=await fetch(base+prefix+'/materials/'+material.id+'/download',{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(download.status,200);assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
   await call(prefix+'/materials/'+material.id+'/download','GET',undefined,jwt('stranger'),404);
+  if(process.argv.includes('--fresh-only')) {
+   const verify=new Client({connectionString:process.env.DATABASE_URL});await verify.connect();
+   try {
+    assert.deepEqual((await verify.query('SELECT * FROM docgrid.docgrid_branch_documents')).rows,[{id:'legacy',content:'Keep this document'}]);
+    assert.equal((await verify.query('SELECT finished_at FROM docgrid._prisma_migrations')).rows[0].finished_at,null);
+    assert.equal((await verify.query("SELECT tableowner FROM pg_tables WHERE schemaname='docgrid' AND tablename='docgrid_branch_documents'")).rows[0].tableowner,'legacy_owner');
+    assert.equal((await verify.query("SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema='docgrid' AND table_name='docgrid_branch_documents'")).rows[0].n,2);
+    assert.ok((await verify.query("SELECT count(*)::int AS n FROM docgrid_live._prisma_migrations WHERE finished_at IS NOT NULL")).rows[0].n>=23);
+   } finally {await verify.end();}
+   clearTimeout(timeout);passed=true;console.log('PASS fresh schema: two deploys, real Prisma identity/project, upload/download, old data/owners/failed ledger untouched');return;
+  }
   if(process.argv.includes('--discussions-only')){await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   if(process.argv.includes('--workflows-only')){await require('./discussion-workflow-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   await require('./folder-share-acceptance.cjs')({call,jwt,base,db});
@@ -63,8 +85,9 @@ async function run(args) {
   await require('./context-acceptance.cjs')({call,jwt,db,app});
   await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});
   await require('./ocr-search-acceptance.cjs')({call,prefix,p,material,jwt,db,app});
-  const tables=await db.$queryRaw`SELECT table_schema,table_name FROM information_schema.tables WHERE table_name IN ('workspace_projects','User','_prisma_migrations') AND table_schema IN ('public','docgrid')`;
-  assert.ok(tables.length>=3);assert.ok(tables.every(t=>t.table_schema==='docgrid'),JSON.stringify(tables));
+  const tables=await db.$queryRaw`SELECT table_schema,table_name FROM information_schema.tables WHERE table_name IN ('workspace_projects','User','_prisma_migrations') AND table_schema IN ('public','docgrid_live')`;
+  assert.ok(tables.length>=3);assert.ok(tables.every(t=>t.table_schema==='docgrid_live'),JSON.stringify(tables));
   clearTimeout(timeout);passed=true;console.log('PASS standalone HTTP + real Prisma: SSO, forged headers rejected, project isolation, nested upload/download, draft, Home, agent grants, MCP, isolated schema and repeatable migrations; no Legal Core');
  }finally{await app?.close();await socket?.stop();await embedded?.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
+

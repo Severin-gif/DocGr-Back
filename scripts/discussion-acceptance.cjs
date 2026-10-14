@@ -96,7 +96,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT='1';
   await bsend({},429);
   // Two discussions still share one quota. Their requests cannot race past the last slot.
-  await db.$executeRaw`UPDATE docgrid.dg_ai_daily_usage SET requests=0 WHERE user_id=(SELECT owner_id FROM docgrid.dg_discussions WHERE id=${builtin.id}::uuid)`;
+  await db.$executeRaw`UPDATE docgrid_live.dg_ai_daily_usage SET requests=0 WHERE user_id=(SELECT owner_id FROM docgrid_live.dg_discussions WHERE id=${builtin.id}::uuid)`;
   const second=await call(prefix+'/discussions','POST',{title:'Второй чат'},jwt('reader'),201);
   const race=await Promise.allSettled([bsend(),call(prefix+'/discussions/'+second.id+'/turns','POST',{requestKey:randomUUID(),instruction:'Объясни',mode:'advisor',task:'chat',sourceIds:[material.id]},jwt('reader'),201)]);
   assert.equal(race.filter(r=>r.status==='fulfilled').length,1);
@@ -112,3 +112,4 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   console.log('PASS discussions: ACL, idempotent sends, evidence quotes, reviewed moves, advisor boundary, stale package rollback, draft package + attachments + payment gaps, grant revocation');
  }finally{await new Promise(resolve=>server.close(resolve));delete process.env.DOCGRID_ORCHESTRA_URL;}
 };
+

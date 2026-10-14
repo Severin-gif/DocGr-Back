@@ -70,9 +70,9 @@ export class DocGridService {
   private async requireRepo(db: Db, ownerId: string, projectId: string, action: 'read' | 'write' | 'merge' | 'owner' = 'read'): Promise<RepoRow> {
     const rows = await db.$queryRaw<RepoRow[]>`
       SELECT p.id, p.slug, p.name, p.description, p.created_at AS "createdAt", p.updated_at AS "updatedAt"
-      FROM docgrid.workspace_projects p
+      FROM docgrid_live.workspace_projects p
       WHERE p.id = ${projectId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (
-        SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}
+        SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}
         AND (${action}='read' OR (${action}='write' AND m.role IN ('EDITOR','REVIEWER')) OR (${action}='merge' AND m.role='REVIEWER'))
       )) FOR UPDATE OF p
     `;
@@ -84,9 +84,9 @@ export class DocGridService {
     const rows = await db.$queryRaw<BranchRow[]>`
       SELECT b.id, b.project_id AS "projectId", b.name, b.kind, b.created_by AS "createdBy",
              b.created_at AS "createdAt", b.updated_at AS "updatedAt"
-      FROM docgrid.docgrid_branches b
-      JOIN docgrid.workspace_projects p ON p.id = b.project_id
-      WHERE b.id = ${branchId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
+      FROM docgrid_live.docgrid_branches b
+      JOIN docgrid_live.workspace_projects p ON p.id = b.project_id
+      WHERE b.id = ${branchId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
       LIMIT 1
     `;
     if (!rows[0]) throw new NotFoundException('Вариант не найден');
@@ -96,7 +96,7 @@ export class DocGridService {
 
   private async event(db: Db, projectId: string, actorId: string, eventType: string, entityType: string, entityId: string | null, metadata: unknown = {}) {
     await db.$executeRaw`
-      INSERT INTO docgrid.docgrid_events(project_id, actor_id, event_type, entity_type, entity_id, metadata)
+      INSERT INTO docgrid_live.docgrid_events(project_id, actor_id, event_type, entity_type, entity_id, metadata)
       VALUES (${projectId}::uuid, ${actorId}, ${eventType}, ${entityType},
               CASE WHEN ${entityId}::text IS NULL THEN NULL ELSE ${entityId}::uuid END,
               ${JSON.stringify(metadata)}::jsonb)
@@ -106,23 +106,23 @@ export class DocGridService {
   private async persistDocx(db: Db, branchId: string, documentId: string, commitId: string | null, content: string) {
     const {bytes,digest,version}=await commitDocxSnapshot(db,documentId,commitId,content);
     if(commitId){
-      await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${version} WHERE head_commit_id=${commitId}::uuid AND document_id=${documentId}::uuid AND content=${content}`;
+      await db.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${version} WHERE head_commit_id=${commitId}::uuid AND document_id=${documentId}::uuid AND content=${content}`;
     }else{
-      await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${version} WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
+      await db.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET docx_bytes=${bytes},docx_sha256=${digest},format_version=${version} WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
     }
   }
 
   private async ensureMainBranch(db: Db, ownerId: string, projectId: string): Promise<BranchRow> {
     await this.requireRepo(db, ownerId, projectId);
     await db.$executeRaw`
-      INSERT INTO docgrid.docgrid_branches(project_id, name, kind, created_by)
+      INSERT INTO docgrid_live.docgrid_branches(project_id, name, kind, created_by)
       VALUES (${projectId}::uuid, 'main', 'MAIN', ${ownerId})
       ON CONFLICT (project_id, name) DO NOTHING
     `;
     const branches = await db.$queryRaw<BranchRow[]>`
       SELECT id, project_id AS "projectId", name, kind, created_by AS "createdBy",
              created_at AS "createdAt", updated_at AS "updatedAt"
-      FROM docgrid.docgrid_branches
+      FROM docgrid_live.docgrid_branches
       WHERE project_id = ${projectId}::uuid AND name = 'main'
       LIMIT 1
     `;
@@ -130,9 +130,9 @@ export class DocGridService {
     if (!main) throw new ConflictException('Не удалось создать основной вариант');
 
     await db.$executeRaw`
-      INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, workspace_version)
+      INSERT INTO docgrid_live.docgrid_branch_documents(branch_id, document_id, revision, content, workspace_version)
       SELECT ${main.id}::uuid, d.id, 1, d.content, d.version
-      FROM docgrid.workspace_documents d
+      FROM docgrid_live.workspace_documents d
       WHERE d.project_id = ${projectId}::uuid
       ON CONFLICT (branch_id, document_id) DO NOTHING
     `;
@@ -236,18 +236,18 @@ export class DocGridService {
       });
       const hash = this.hashCommit(main.id, document.id, 1, 'Создан документ', content);
       const commits = await tx.$queryRaw<Array<{ id: string; hash: string; createdAt: Date }>>`
-        INSERT INTO docgrid.docgrid_commits(project_id, branch_id, document_id, parent_commit_id, author_id, message, before_content, after_content, content_hash)
+        INSERT INTO docgrid_live.docgrid_commits(project_id, branch_id, document_id, parent_commit_id, author_id, message, before_content, after_content, content_hash)
         VALUES (${projectId}::uuid, ${main.id}::uuid, ${document.id}::uuid, NULL, ${ownerId},
                 'Создан документ', '', ${content}, ${hash})
         RETURNING id, content_hash AS hash, created_at AS "createdAt"
       `;
       await tx.$executeRaw`
-        INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version)
+        INSERT INTO docgrid_live.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version)
         VALUES (${main.id}::uuid, ${document.id}::uuid, 1, ${content}, ${commits[0].id}::uuid, 1)
       `;
       await this.persistDocx(tx, main.id, document.id, commits[0].id, content);
-      await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at=CURRENT_TIMESTAMP WHERE id=${main.id}::uuid`;
-      await tx.$executeRaw`UPDATE docgrid.workspace_projects SET updated_at=CURRENT_TIMESTAMP WHERE id=${projectId}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_branches SET updated_at=CURRENT_TIMESTAMP WHERE id=${main.id}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.workspace_projects SET updated_at=CURRENT_TIMESTAMP WHERE id=${projectId}::uuid`;
       await this.event(tx, projectId, ownerId, 'artifact.created', 'document', document.id, {
         title,
         branch: 'main',
@@ -261,12 +261,12 @@ export class DocGridService {
   async listRepositories(ownerId: string) {
     const repos = await this.prisma.$queryRaw<Array<RepoRow & { documents: bigint; branches: bigint; openReviews: bigint; openIssues: bigint }>>`
       SELECT p.id, p.slug, p.name, p.description, p.created_at AS "createdAt", p.updated_at AS "updatedAt",
-        (SELECT COUNT(*) FROM docgrid.workspace_documents d WHERE d.project_id = p.id) AS documents,
-        (SELECT COUNT(*) FROM docgrid.docgrid_branches b WHERE b.project_id = p.id) AS branches,
-        (SELECT COUNT(*) FROM docgrid.docgrid_reviews r WHERE r.project_id = p.id AND r.status IN ('OPEN','CONFLICT')) AS "openReviews",
-        (SELECT COUNT(*) FROM docgrid.docgrid_issues i WHERE i.project_id = p.id AND i.status = 'OPEN') AS "openIssues"
-      FROM docgrid.workspace_projects p
-      WHERE (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
+        (SELECT COUNT(*) FROM docgrid_live.workspace_documents d WHERE d.project_id = p.id) AS documents,
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_branches b WHERE b.project_id = p.id) AS branches,
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_reviews r WHERE r.project_id = p.id AND r.status IN ('OPEN','CONFLICT')) AS "openReviews",
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_issues i WHERE i.project_id = p.id AND i.status = 'OPEN') AS "openIssues"
+      FROM docgrid_live.workspace_projects p
+      WHERE (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
       ORDER BY p.updated_at DESC
     `;
     return repos.map(r => ({ ...r, documents: Number(r.documents), branches: Number(r.branches), openReviews: Number(r.openReviews), openIssues: Number(r.openIssues) }));
@@ -292,9 +292,9 @@ export class DocGridService {
     const rows = await db.$queryRaw<Array<BranchRow & { documents: bigint; commits: bigint }>>`
       SELECT b.id, b.project_id AS "projectId", b.name, b.kind, b.created_by AS "createdBy",
              b.created_at AS "createdAt", b.updated_at AS "updatedAt",
-             (SELECT COUNT(*) FROM docgrid.docgrid_branch_documents bd WHERE bd.branch_id = b.id) AS documents,
-             (SELECT COUNT(*) FROM docgrid.docgrid_commits c WHERE c.branch_id = b.id) AS commits
-      FROM docgrid.docgrid_branches b
+             (SELECT COUNT(*) FROM docgrid_live.docgrid_branch_documents bd WHERE bd.branch_id = b.id) AS documents,
+             (SELECT COUNT(*) FROM docgrid_live.docgrid_commits c WHERE c.branch_id = b.id) AS commits
+      FROM docgrid_live.docgrid_branches b
       WHERE b.project_id = ${projectId}::uuid
       ORDER BY CASE WHEN b.name = 'main' THEN 0 ELSE 1 END, b.updated_at DESC
     `;
@@ -317,7 +317,7 @@ export class DocGridService {
       const source = dto.fromBranchId ? await this.requireBranch(tx, ownerId, dto.fromBranchId) : main;
       if (source.projectId !== projectId) throw new NotFoundException('Исходный вариант не относится к проекту');
       const rows = await tx.$queryRaw<BranchRow[]>`
-        INSERT INTO docgrid.docgrid_branches(project_id, name, kind, created_by)
+        INSERT INTO docgrid_live.docgrid_branches(project_id, name, kind, created_by)
         VALUES (${projectId}::uuid, ${name}, ${dto.kind ?? 'WORK'}, ${ownerId})
         RETURNING id, project_id AS "projectId", name, kind, created_by AS "createdBy",
                   created_at AS "createdAt", updated_at AS "updatedAt"
@@ -327,9 +327,9 @@ export class DocGridService {
       });
       const branch = rows[0];
       await tx.$executeRaw`
-        INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version, base_content, base_branch_id, docx_bytes, docx_sha256, format_version)
+        INSERT INTO docgrid_live.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version, base_content, base_branch_id, docx_bytes, docx_sha256, format_version)
         SELECT ${branch.id}::uuid, document_id, revision, content, head_commit_id, workspace_version, content, ${source.id}::uuid, docx_bytes, docx_sha256, format_version
-        FROM docgrid.docgrid_branch_documents
+        FROM docgrid_live.docgrid_branch_documents
         WHERE branch_id = ${source.id}::uuid
       `;
       await this.event(tx, projectId, ownerId, 'branch.created', 'branch', branch.id, { name, from: source.name, kind: branch.kind });
@@ -345,8 +345,8 @@ export class DocGridService {
         SELECT bd.branch_id AS "branchId", bd.document_id AS "documentId", d.title, d.path,
                bd.revision, bd.content, 'docx'::text AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
                bd.workspace_version AS "workspaceVersion", bd.updated_at AS "updatedAt"
-        FROM docgrid.docgrid_branch_documents bd
-        JOIN docgrid.workspace_documents d ON d.id = bd.document_id
+        FROM docgrid_live.docgrid_branch_documents bd
+        JOIN docgrid_live.workspace_documents d ON d.id = bd.document_id
         WHERE bd.branch_id = ${branchId}::uuid AND d.docgrid_deleted_at IS NULL
         ORDER BY d.path, d.title
       `;
@@ -356,7 +356,7 @@ export class DocGridService {
   async documentChecks(ownerId:string,branchId:string,documentId:string,revision:number) {
     if(!Number.isInteger(revision)||revision<1||revision>999999999)throw new BadRequestException("Неверный номер редакции");
     const branch=await this.requireBranch(this.prisma,ownerId,branchId);
-    const rows=await this.prisma.$queryRaw<Array<{content:string;revision:number}>>`SELECT bd.content,bd.revision FROM docgrid.docgrid_branch_documents bd JOIN docgrid.workspace_documents d ON d.id=bd.document_id WHERE bd.branch_id=${branch.id}::uuid AND bd.document_id=${documentId}::uuid AND d.docgrid_deleted_at IS NULL`;
+    const rows=await this.prisma.$queryRaw<Array<{content:string;revision:number}>>`SELECT bd.content,bd.revision FROM docgrid_live.docgrid_branch_documents bd JOIN docgrid_live.workspace_documents d ON d.id=bd.document_id WHERE bd.branch_id=${branch.id}::uuid AND bd.document_id=${documentId}::uuid AND d.docgrid_deleted_at IS NULL`;
     if(!rows[0])throw new NotFoundException('Документ отсутствует в варианте');
     if(rows[0].revision!==revision)throw new ConflictException('Редакция изменилась. Повторите проверку текущей версии.');
     return {...checkDocument(rows[0].content,revision),documentId,branchId};
@@ -375,9 +375,9 @@ export class DocGridService {
   ): Promise<number> {
     const docs = await tx.$queryRaw<Array<{ version: number }>>`
       SELECT d.version
-      FROM docgrid.workspace_documents d
-      JOIN docgrid.workspace_projects p ON p.id = d.project_id
-      WHERE d.id = ${branchDocument.documentId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
+      FROM docgrid_live.workspace_documents d
+      JOIN docgrid_live.workspace_projects p ON p.id = d.project_id
+      WHERE d.id = ${branchDocument.documentId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
       FOR UPDATE
     `;
     const workspace = docs[0];
@@ -387,12 +387,12 @@ export class DocGridService {
     }
     const next = workspace.version + 1;
     await tx.$executeRaw`
-      UPDATE docgrid.workspace_documents
+      UPDATE docgrid_live.workspace_documents
       SET content = ${content}, version = ${next}, updated_at = CURRENT_TIMESTAMP
       WHERE id = ${branchDocument.documentId}::uuid
     `;
     await tx.$executeRaw`
-      INSERT INTO docgrid.workspace_document_versions(document_id, version, content, author_id, message)
+      INSERT INTO docgrid_live.workspace_document_versions(document_id, version, content, author_id, message)
       VALUES (${branchDocument.documentId}::uuid, ${next}, ${content}, ${ownerId}, ${message})
     `;
     return next;
@@ -408,8 +408,8 @@ export class DocGridService {
         SELECT bd.branch_id AS "branchId", bd.document_id AS "documentId", d.title, d.path,
                bd.revision, bd.content, 'docx'::text AS "fileFormat", bd.format_version AS "formatVersion", bd.head_commit_id AS "headCommitId",
                bd.workspace_version AS "workspaceVersion", bd.updated_at AS "updatedAt"
-        FROM docgrid.docgrid_branch_documents bd
-        JOIN docgrid.workspace_documents d ON d.id = bd.document_id
+        FROM docgrid_live.docgrid_branch_documents bd
+        JOIN docgrid_live.workspace_documents d ON d.id = bd.document_id
         WHERE bd.branch_id = ${branchId}::uuid AND bd.document_id = ${documentId}::uuid AND d.docgrid_deleted_at IS NULL
         FOR UPDATE
       `;
@@ -419,9 +419,9 @@ export class DocGridService {
       if (dto.targetBranchId) {
         const target = await this.requireBranch(tx, ownerId, dto.targetBranchId);
         if (target.projectId !== branch.projectId || target.id === branchId) throw new BadRequestException('Неверный целевой вариант');
-        const targetRows = await tx.$queryRaw<Array<{content:string;revision:number}>>`SELECT content,revision FROM docgrid.docgrid_branch_documents WHERE branch_id=${target.id}::uuid AND document_id=${documentId}::uuid FOR UPDATE`;
+        const targetRows = await tx.$queryRaw<Array<{content:string;revision:number}>>`SELECT content,revision FROM docgrid_live.docgrid_branch_documents WHERE branch_id=${target.id}::uuid AND document_id=${documentId}::uuid FOR UPDATE`;
         if (!targetRows[0] || targetRows[0].revision !== dto.targetRevision) throw new ConflictException('CONFLICT: целевой вариант изменился');
-        await tx.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET base_content=${targetRows[0].content},base_branch_id=${target.id}::uuid WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
+        await tx.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET base_content=${targetRows[0].content},base_branch_id=${target.id}::uuid WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
         await this.event(tx,branch.projectId,ownerId,'conflict.resolved','document',documentId,{sourceBranchId:branchId,targetBranchId:target.id,targetRevision:dto.targetRevision});
       }
       if (current.content === dto.content && !dto.targetBranchId) {
@@ -432,7 +432,7 @@ export class DocGridService {
       const nextRevision = current.revision + 1;
       const hash = this.hashCommit(branchId, documentId, nextRevision, dto.message.trim(), dto.content);
       const commits = await tx.$queryRaw<Array<{ id: string; hash: string; createdAt: Date }>>`
-        INSERT INTO docgrid.docgrid_commits(project_id, branch_id, document_id, parent_commit_id, author_id, message, before_content, after_content, content_hash)
+        INSERT INTO docgrid_live.docgrid_commits(project_id, branch_id, document_id, parent_commit_id, author_id, message, before_content, after_content, content_hash)
         VALUES (${branch.projectId}::uuid, ${branchId}::uuid, ${documentId}::uuid,
                 ${current.headCommitId}::uuid, ${ownerId}, ${dto.message.trim()},
                 ${current.content}, ${dto.content}, ${hash})
@@ -442,14 +442,14 @@ export class DocGridService {
       if (branch.name === 'main') workspaceVersion = await this.syncMainWorkspace(tx, ownerId, current, dto.content, dto.message.trim());
 
       await tx.$executeRaw`
-        UPDATE docgrid.docgrid_branch_documents
+        UPDATE docgrid_live.docgrid_branch_documents
         SET content = ${dto.content}, revision = ${nextRevision}, head_commit_id = ${commits[0].id}::uuid,
             workspace_version = ${workspaceVersion}, updated_at = CURRENT_TIMESTAMP
         WHERE branch_id = ${branchId}::uuid AND document_id = ${documentId}::uuid
       `;
       await this.persistDocx(tx, branchId, documentId, commits[0].id, dto.content);
-      await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branchId}::uuid`;
-      await tx.$executeRaw`UPDATE docgrid.workspace_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branch.projectId}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branchId}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.workspace_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ${branch.projectId}::uuid`;
       await this.event(tx, branch.projectId, ownerId, 'commit.created', 'commit', commits[0].id, { branch: branch.name, documentId, revision: nextRevision, hash });
       return { ...current, fileFormat: 'docx', formatVersion: DOCX_STRUCTURE_VERSION, content: dto.content, revision: nextRevision, headCommitId: commits[0].id, workspaceVersion, commit: commits[0], checks:checkDocument(dto.content,nextRevision) };
     }, { timeout: 30000 });
@@ -462,8 +462,8 @@ export class DocGridService {
       SELECT c.id, c.project_id AS "projectId", c.branch_id AS "branchId", c.document_id AS "documentId",
              c.parent_commit_id AS "parentCommitId", c.author_id AS "authorId", c.message,
              c.content_hash AS hash, c.created_at AS "createdAt", d.title AS "documentTitle"
-      FROM docgrid.docgrid_commits c
-      JOIN docgrid.workspace_documents d ON d.id = c.document_id
+      FROM docgrid_live.docgrid_commits c
+      JOIN docgrid_live.workspace_documents d ON d.id = c.document_id
       WHERE c.branch_id = ${branchId}::uuid
       ORDER BY c.created_at DESC
       LIMIT ${safeLimit}
@@ -476,10 +476,10 @@ export class DocGridService {
              c.parent_commit_id AS "parentCommitId", c.author_id AS "authorId", c.message,
              c.before_content AS "beforeContent", c.after_content AS "afterContent",
              c.content_hash AS hash, c.created_at AS "createdAt", d.title AS "documentTitle"
-      FROM docgrid.docgrid_commits c
-      JOIN docgrid.workspace_projects p ON p.id = c.project_id
-      JOIN docgrid.workspace_documents d ON d.id = c.document_id
-      WHERE c.id = ${commitId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
+      FROM docgrid_live.docgrid_commits c
+      JOIN docgrid_live.workspace_projects p ON p.id = c.project_id
+      JOIN docgrid_live.workspace_documents d ON d.id = c.document_id
+      WHERE c.id = ${commitId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
       LIMIT 1
     `;
     if (!rows[0]) throw new NotFoundException('Коммит не найден');
@@ -519,9 +519,9 @@ export class DocGridService {
              s.content AS "sourceContent", t.content AS "targetContent",
              s.head_commit_id AS "sourceHeadCommitId", t.head_commit_id AS "targetHeadCommitId",
              s.workspace_version AS "sourceWorkspaceVersion", t.workspace_version AS "targetWorkspaceVersion"
-      FROM docgrid.workspace_documents d
-      LEFT JOIN docgrid.docgrid_branch_documents s ON s.document_id = d.id AND s.branch_id = ${sourceBranchId}::uuid
-      LEFT JOIN docgrid.docgrid_branch_documents t ON t.document_id = d.id AND t.branch_id = ${targetBranchId}::uuid
+      FROM docgrid_live.workspace_documents d
+      LEFT JOIN docgrid_live.docgrid_branch_documents s ON s.document_id = d.id AND s.branch_id = ${sourceBranchId}::uuid
+      LEFT JOIN docgrid_live.docgrid_branch_documents t ON t.document_id = d.id AND t.branch_id = ${targetBranchId}::uuid
       WHERE d.project_id = ${projectId}::uuid AND d.docgrid_deleted_at IS NULL
       ORDER BY d.title
     `;
@@ -565,7 +565,7 @@ export class DocGridService {
       const sourceSnapshot = Object.fromEntries(changed.map(r => [r.documentId, r.sourceRevision ?? 0]));
       const targetSnapshot = Object.fromEntries(changed.map(r => [r.documentId, r.targetRevision ?? 0]));
       const rows = await tx.$queryRaw<ReviewRow[]>`
-        INSERT INTO docgrid.docgrid_reviews(project_id, source_branch_id, target_branch_id, author_id, title, body, status, source_snapshot, target_snapshot)
+        INSERT INTO docgrid_live.docgrid_reviews(project_id, source_branch_id, target_branch_id, author_id, title, body, status, source_snapshot, target_snapshot)
         VALUES (${dto.projectId}::uuid, ${source.id}::uuid, ${target.id}::uuid, ${ownerId},
                 ${dto.title.trim()}, ${dto.body?.trim() || null}, ${status}, ${JSON.stringify(sourceSnapshot)}::jsonb, ${JSON.stringify(targetSnapshot)}::jsonb)
         RETURNING id, project_id AS "projectId", source_branch_id AS "sourceBranchId",
@@ -586,9 +586,9 @@ export class DocGridService {
              r.target_branch_id AS "targetBranchId", t.name AS "targetBranch",
              r.author_id AS "authorId", r.merged_by AS "mergedBy",
              r.created_at AS "createdAt", r.updated_at AS "updatedAt", r.merged_at AS "mergedAt"
-      FROM docgrid.docgrid_reviews r
-      JOIN docgrid.docgrid_branches s ON s.id = r.source_branch_id
-      JOIN docgrid.docgrid_branches t ON t.id = r.target_branch_id
+      FROM docgrid_live.docgrid_reviews r
+      JOIN docgrid_live.docgrid_branches s ON s.id = r.source_branch_id
+      JOIN docgrid_live.docgrid_branches t ON t.id = r.target_branch_id
       WHERE r.project_id = ${projectId}::uuid
       ORDER BY CASE WHEN r.status IN ('OPEN','CONFLICT') THEN 0 ELSE 1 END, r.created_at DESC
     `;
@@ -606,14 +606,14 @@ export class DocGridService {
                r.title, r.body, r.status, r.source_snapshot AS "sourceSnapshot",
                r.target_snapshot AS "targetSnapshot", r.created_at AS "createdAt",
                r.updated_at AS "updatedAt", r.merged_at AS "mergedAt"
-        FROM docgrid.docgrid_reviews r
-        JOIN docgrid.workspace_projects p ON p.id = r.project_id
-        WHERE r.id = ${reviewId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
+        FROM docgrid_live.docgrid_reviews r
+        JOIN docgrid_live.workspace_projects p ON p.id = r.project_id
+        WHERE r.id = ${reviewId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
       `;
       let review = rows[0];
       if (!review) throw new NotFoundException('Согласование не найдено');
       await this.requireRepo(tx,ownerId,review.projectId,'merge');
-      const locked = await tx.$queryRaw<Array<{status:string;sourceSnapshot:Record<string,number>;targetSnapshot:Record<string,number>}>>`SELECT status,source_snapshot AS "sourceSnapshot",target_snapshot AS "targetSnapshot" FROM docgrid.docgrid_reviews WHERE id=${reviewId}::uuid FOR UPDATE`;
+      const locked = await tx.$queryRaw<Array<{status:string;sourceSnapshot:Record<string,number>;targetSnapshot:Record<string,number>}>>`SELECT status,source_snapshot AS "sourceSnapshot",target_snapshot AS "targetSnapshot" FROM docgrid_live.docgrid_reviews WHERE id=${reviewId}::uuid FOR UPDATE`;
       review = {...review,...locked[0]};
       if (review.status === 'MERGED') return review;
       if (!['OPEN','CONFLICT'].includes(review.status)) throw new ConflictException('Согласование уже закрыто');
@@ -630,7 +630,7 @@ export class DocGridService {
         (row.targetRevision ?? 0) !== Number(review.targetSnapshot[row.documentId] ?? -1));
       const conflicts = changed.filter(row=>row.baseBranchId!==target.id || mergeText(row.baseContent,row.sourceContent??'',row.targetContent??'').conflict);
       if (stale || conflicts.length) {
-        await tx.$executeRaw`UPDATE docgrid.docgrid_reviews SET status='CONFLICT',updated_at=now() WHERE id=${reviewId}::uuid`;
+        await tx.$executeRaw`UPDATE docgrid_live.docgrid_reviews SET status='CONFLICT',updated_at=now() WHERE id=${reviewId}::uuid`;
         await this.event(tx,review.projectId,ownerId,'review.conflict','review',reviewId,{stale,documents:conflicts.map(r=>r.documentId)});
         return { conflict:true, code:'CONFLICT', message:stale?'Версии изменились. Проверьте изменения и обновите PR.':'Исправьте конфликтующие документы перед слиянием.', documents:conflicts.map(r=>r.documentId) };
       }
@@ -647,19 +647,19 @@ export class DocGridService {
         const message = `Приняты правки: ${review.title}`;
         const hash = this.hashCommit(target.id, row.documentId, nextRevision, message, after);
         const commits = await tx.$queryRaw<Array<{ id: string }>>`
-          INSERT INTO docgrid.docgrid_commits(project_id, branch_id, document_id, parent_commit_id, author_id, message, before_content, after_content, content_hash)
+          INSERT INTO docgrid_live.docgrid_commits(project_id, branch_id, document_id, parent_commit_id, author_id, message, before_content, after_content, content_hash)
           VALUES (${review.projectId}::uuid, ${target.id}::uuid, ${row.documentId}::uuid,
                   ${row.targetHeadCommitId}::uuid, ${ownerId}, ${message}, ${before}, ${after}, ${hash})
           RETURNING id
         `;
         if (row.targetRevision === null) {
           await tx.$executeRaw`
-            INSERT INTO docgrid.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version)
+            INSERT INTO docgrid_live.docgrid_branch_documents(branch_id, document_id, revision, content, head_commit_id, workspace_version)
             VALUES (${target.id}::uuid, ${row.documentId}::uuid, 1, ${after}, ${commits[0].id}::uuid, NULL)
           `;
         } else {
           await tx.$executeRaw`
-            UPDATE docgrid.docgrid_branch_documents
+            UPDATE docgrid_live.docgrid_branch_documents
             SET content = ${after}, revision = ${nextRevision}, head_commit_id = ${commits[0].id}::uuid, updated_at = CURRENT_TIMESTAMP
             WHERE branch_id = ${target.id}::uuid AND document_id = ${row.documentId}::uuid
           `;
@@ -673,19 +673,19 @@ export class DocGridService {
           };
           const workspaceVersion = await this.syncMainWorkspace(tx, ownerId, pseudo, after, message);
           await tx.$executeRaw`
-            UPDATE docgrid.docgrid_branch_documents
+            UPDATE docgrid_live.docgrid_branch_documents
             SET workspace_version = ${workspaceVersion}
             WHERE branch_id = ${target.id}::uuid AND document_id = ${row.documentId}::uuid
           `;
         }
       }
-      for (const row of changed) await tx.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET base_content=${row.sourceContent ?? ''},base_branch_id=${target.id}::uuid WHERE branch_id=${source.id}::uuid AND document_id=${row.documentId}::uuid`;
+      for (const row of changed) await tx.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET base_content=${row.sourceContent ?? ''},base_branch_id=${target.id}::uuid WHERE branch_id=${source.id}::uuid AND document_id=${row.documentId}::uuid`;
       await tx.$executeRaw`
-        UPDATE docgrid.docgrid_reviews
+        UPDATE docgrid_live.docgrid_reviews
         SET status = 'MERGED', merged_by = ${ownerId}, merged_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
         WHERE id = ${reviewId}::uuid
       `;
-      await tx.$executeRaw`UPDATE docgrid.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${target.id}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_branches SET updated_at = CURRENT_TIMESTAMP WHERE id = ${target.id}::uuid`;
       await this.event(tx, review.projectId, ownerId, 'review.merged', 'review', review.id, { source: source.name, target: target.name, documents: changed.length,checks:checks.map(c=>({documentId:c.documentId,contentHash:c.contentHash,errors:c.errors,warnings:c.warnings,engineVersion:c.engineVersion})) });
       return { ...review, checks, status: 'MERGED', mergedBy: ownerId, mergedAt: new Date() };
     }, { timeout: 30000 });
@@ -697,14 +697,14 @@ export class DocGridService {
     return this.prisma.$transaction(async tx => {
       const rows = await tx.$queryRaw<Array<{ projectId: string; status: string }>>`
         SELECT r.project_id AS "projectId", r.status
-        FROM docgrid.docgrid_reviews r JOIN docgrid.workspace_projects p ON p.id = r.project_id
-        WHERE r.id = ${reviewId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
+        FROM docgrid_live.docgrid_reviews r JOIN docgrid_live.workspace_projects p ON p.id = r.project_id
+        WHERE r.id = ${reviewId}::uuid AND (p.owner_id = ${ownerId} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ownerId}))
       `;
       if (!rows[0]) throw new NotFoundException('Согласование не найдено');
       await this.requireRepo(tx,ownerId,rows[0].projectId,'write');
-      const locked=await tx.$queryRaw<Array<{status:string}>>`SELECT status FROM docgrid.docgrid_reviews WHERE id=${reviewId}::uuid FOR UPDATE`;
+      const locked=await tx.$queryRaw<Array<{status:string}>>`SELECT status FROM docgrid_live.docgrid_reviews WHERE id=${reviewId}::uuid FOR UPDATE`;
       if (!['OPEN','CONFLICT'].includes(locked[0].status)) throw new ConflictException('Согласование уже обработано');
-      await tx.$executeRaw`UPDATE docgrid.docgrid_reviews SET status='CLOSED', updated_at=CURRENT_TIMESTAMP WHERE id=${reviewId}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_reviews SET status='CLOSED', updated_at=CURRENT_TIMESTAMP WHERE id=${reviewId}::uuid`;
       await this.event(tx, rows[0].projectId, ownerId, 'review.closed', 'review', reviewId);
       return { id: reviewId, status: 'CLOSED' };
     });
@@ -717,8 +717,8 @@ export class DocGridService {
              i.author_id AS "authorId", i.kind, i.status, i.title, i.body, i.resolution,
              i.created_at AS "createdAt", i.updated_at AS "updatedAt", i.decided_at AS "decidedAt",
              d.title AS "documentTitle"
-      FROM docgrid.docgrid_issues i
-      LEFT JOIN docgrid.workspace_documents d ON d.id = i.linked_document_id
+      FROM docgrid_live.docgrid_issues i
+      LEFT JOIN docgrid_live.workspace_documents d ON d.id = i.linked_document_id
       WHERE i.project_id = ${projectId}::uuid
       ORDER BY CASE WHEN i.status='OPEN' THEN 0 ELSE 1 END, i.updated_at DESC
     `;
@@ -730,12 +730,12 @@ export class DocGridService {
       await this.requireRepo(tx, ownerId, projectId, 'write');
       if (dto.linkedDocumentId) {
         const docs = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM docgrid.workspace_documents WHERE id=${dto.linkedDocumentId}::uuid AND project_id=${projectId}::uuid
+          SELECT id FROM docgrid_live.workspace_documents WHERE id=${dto.linkedDocumentId}::uuid AND project_id=${projectId}::uuid
         `;
         if (!docs[0]) throw new NotFoundException('Связанный документ не найден');
       }
       const rows = await tx.$queryRaw<any[]>`
-        INSERT INTO docgrid.docgrid_issues(project_id, linked_document_id, author_id, kind, title, body)
+        INSERT INTO docgrid_live.docgrid_issues(project_id, linked_document_id, author_id, kind, title, body)
         VALUES (${projectId}::uuid,
                 CASE WHEN ${dto.linkedDocumentId ?? null}::text IS NULL THEN NULL ELSE ${dto.linkedDocumentId ?? null}::uuid END,
                 ${ownerId}, ${dto.kind ?? 'ISSUE'}, ${dto.title.trim()}, ${dto.body?.trim() ?? ''})
@@ -752,7 +752,7 @@ export class DocGridService {
     return this.prisma.$transaction(async tx => {
       const rows = await tx.$queryRaw<Array<{ projectId: string; status: string }>>`
         SELECT i.project_id AS "projectId", i.status
-        FROM docgrid.docgrid_issues i JOIN docgrid.workspace_projects p ON p.id=i.project_id
+        FROM docgrid_live.docgrid_issues i JOIN docgrid_live.workspace_projects p ON p.id=i.project_id
         WHERE i.id=${issueId}::uuid AND p.owner_id=${ownerId}
         FOR UPDATE
       `;
@@ -760,7 +760,7 @@ export class DocGridService {
       await this.requireRepo(tx,ownerId,rows[0].projectId,'write');
       if (rows[0].status !== 'OPEN') throw new ConflictException('Issue уже закрыт');
       await tx.$executeRaw`
-        UPDATE docgrid.docgrid_issues
+        UPDATE docgrid_live.docgrid_issues
         SET status='DECIDED', kind='DECISION', resolution=${dto.resolution.trim()}, decided_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
         WHERE id=${issueId}::uuid
       `;
@@ -774,7 +774,7 @@ export class DocGridService {
     return db.$queryRaw<any[]>`
       SELECT r.id, r.project_id AS "projectId", r.branch_id AS "branchId", b.name AS "branch",
              r.created_by AS "createdBy", r.tag, r.title, r.notes, r.created_at AS "createdAt"
-      FROM docgrid.docgrid_releases r JOIN docgrid.docgrid_branches b ON b.id=r.branch_id
+      FROM docgrid_live.docgrid_releases r JOIN docgrid_live.docgrid_branches b ON b.id=r.branch_id
       WHERE r.project_id=${projectId}::uuid
       ORDER BY r.created_at DESC
     `;
@@ -788,14 +788,14 @@ export class DocGridService {
       if (branch.projectId !== projectId) throw new NotFoundException('Вариант не относится к проекту');
       const docs = await tx.$queryRaw<any[]>`
         SELECT d.id, d.title, d.path, bd.revision, bd.content, bd.head_commit_id AS "headCommitId"
-        FROM docgrid.docgrid_branch_documents bd
-        JOIN docgrid.workspace_documents d ON d.id=bd.document_id
+        FROM docgrid_live.docgrid_branch_documents bd
+        JOIN docgrid_live.workspace_documents d ON d.id=bd.document_id
         WHERE bd.branch_id=${branch.id}::uuid
         ORDER BY d.path,d.title
       `;
       const snapshot = { schemaVersion: 1, branch: { id: branch.id, name: branch.name }, documents: docs };
       const rows = await tx.$queryRaw<any[]>`
-        INSERT INTO docgrid.docgrid_releases(project_id, branch_id, created_by, tag, title, notes, snapshot)
+        INSERT INTO docgrid_live.docgrid_releases(project_id, branch_id, created_by, tag, title, notes, snapshot)
         VALUES (${projectId}::uuid, ${branch.id}::uuid, ${ownerId}, ${dto.tag.trim()}, ${dto.title.trim()},
                 ${dto.notes?.trim() ?? ''}, ${JSON.stringify(snapshot)}::jsonb)
         RETURNING id, project_id AS "projectId", branch_id AS "branchId", created_by AS "createdBy",
@@ -816,7 +816,7 @@ export class DocGridService {
       SELECT e.id::text, e.project_id AS "projectId", e.actor_id AS "actorId",
              e.event_type AS "eventType", e.entity_type AS "entityType", e.entity_id AS "entityId",
              e.metadata, e.created_at AS "createdAt"
-      FROM docgrid.docgrid_events e
+      FROM docgrid_live.docgrid_events e
       WHERE e.project_id=${projectId}::uuid
       ORDER BY e.created_at DESC
       LIMIT ${safe}
@@ -854,19 +854,19 @@ export class DocGridService {
       if (changed.length > 40) throw new BadRequestException('Проверка ИИ ограничена 40 изменёнными документами за один запрос');
       const issues = await tx.$queryRaw<Array<{ id: string; title: string; status: string; body: string }>>`
         SELECT id, title, status, body
-        FROM docgrid.docgrid_issues
+        FROM docgrid_live.docgrid_issues
         WHERE project_id=${projectId}::uuid AND status='OPEN'
         ORDER BY updated_at DESC
         LIMIT 50
       `;
       const decisions = await tx.$queryRaw<Array<{ id: string; title: string; resolution: string }>>`
         SELECT id, title, COALESCE(resolution, '') AS resolution
-        FROM docgrid.docgrid_issues
+        FROM docgrid_live.docgrid_issues
         WHERE project_id=${projectId}::uuid AND status='DECIDED'
         ORDER BY decided_at DESC
         LIMIT 50
       `;
-      const materials=await tx.$queryRaw<Array<{id:string;title:string;sha256:string;text:string;status:string}>>`SELECT id,title,sha256,extracted_text AS text,extraction_status AS status FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND deleted_at IS NULL ORDER BY id`;
+      const materials=await tx.$queryRaw<Array<{id:string;title:string;sha256:string;text:string;status:string}>>`SELECT id,title,sha256,extracted_text AS text,extraction_status AS status FROM docgrid_live.docgrid_materials WHERE project_id=${projectId}::uuid AND deleted_at IS NULL ORDER BY id`;
       let remaining=80000;
       const evidence=materials.map(m=>{const text=m.text.slice(0,Math.min(12000,remaining));remaining-=text.length;return {id:m.id,title:m.title,sha256:m.sha256,text,status:text.length<m.text.length?'PARTIAL':m.status};});
       const fingerprint=createHash('sha256').update(JSON.stringify({states,materials:materials.map(m=>({id:m.id,sha256:m.sha256,status:m.status}))})).digest('hex');
@@ -923,7 +923,7 @@ export class DocGridService {
     await this.requireRepo(this.prisma,ownerId,projectId,'write');
     payload.coverage=context.evidence.map(({id,title,status})=>({id,title,status}));
     payload.fingerprint=context.fingerprint;
-    await this.prisma.$executeRaw`INSERT INTO docgrid.docgrid_judgments(project_id,source_branch_id,target_branch_id,actor_id,fingerprint,result) VALUES(${projectId}::uuid,${context.source.id}::uuid,${context.target.id}::uuid,${ownerId},${context.fingerprint},${JSON.stringify(payload)}::jsonb)`;
+    await this.prisma.$executeRaw`INSERT INTO docgrid_live.docgrid_judgments(project_id,source_branch_id,target_branch_id,actor_id,fingerprint,result) VALUES(${projectId}::uuid,${context.source.id}::uuid,${context.target.id}::uuid,${ownerId},${context.fingerprint},${JSON.stringify(payload)}::jsonb)`;
     await this.event(this.prisma, projectId, ownerId, 'ai.review.completed', 'branch', context.source.id, {
       mode: 'review',
       sourceBranch: context.source.name,
@@ -947,10 +947,10 @@ export class DocGridService {
 
   async files(ownerId:string,projectId:string,trash=false) {
     await this.requireRepo(this.prisma,ownerId,projectId);
-    const materials=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,mime,byte_size AS size,sha256,extraction_status AS "extractionStatus",extraction_reason AS "extractionReason",created_at AS "createdAt",deleted_at AS "deletedAt" FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND (deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
-    const documents=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,docgrid_deleted_at AS "deletedAt" FROM docgrid.workspace_documents WHERE project_id=${projectId}::uuid AND (docgrid_deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
-    const folders=await this.prisma.$queryRaw<any[]>`SELECT id,path FROM docgrid.docgrid_folders WHERE project_id=${projectId}::uuid ORDER BY path`;
-    const artifacts=trash?[]:await this.prisma.$queryRaw<any[]>`SELECT d.id,d.title,b.path,d.current_version AS version FROM docgrid.dg_astra_documents b JOIN docgrid.prepared_legal_documents d ON d.id=b.document_id WHERE b.project_id=${projectId}::uuid ORDER BY b.path,d.title`;
+    const materials=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,mime,byte_size AS size,sha256,extraction_status AS "extractionStatus",extraction_reason AS "extractionReason",created_at AS "createdAt",deleted_at AS "deletedAt" FROM docgrid_live.docgrid_materials WHERE project_id=${projectId}::uuid AND (deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
+    const documents=await this.prisma.$queryRaw<any[]>`SELECT id,title,path,docgrid_deleted_at AS "deletedAt" FROM docgrid_live.workspace_documents WHERE project_id=${projectId}::uuid AND (docgrid_deleted_at IS NOT NULL)=${trash} ORDER BY path,title`;
+    const folders=await this.prisma.$queryRaw<any[]>`SELECT id,path FROM docgrid_live.docgrid_folders WHERE project_id=${projectId}::uuid ORDER BY path`;
+    const artifacts=trash?[]:await this.prisma.$queryRaw<any[]>`SELECT d.id,d.title,b.path,d.current_version AS version FROM docgrid_live.dg_astra_documents b JOIN docgrid_live.prepared_legal_documents d ON d.id=b.document_id WHERE b.project_id=${projectId}::uuid ORDER BY b.path,d.title`;
     return {materials,documents,folders,artifacts};
   }
 
@@ -958,7 +958,7 @@ export class DocGridService {
     const parts = path.split('/').filter(Boolean);
     for (let depth = 1; depth <= parts.length; depth++) {
       const ancestor = '/' + parts.slice(0, depth).join('/');
-      await tx.$executeRaw`INSERT INTO docgrid.docgrid_folders(project_id,path) VALUES(${projectId}::uuid,${ancestor}) ON CONFLICT DO NOTHING`;
+      await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_folders(project_id,path) VALUES(${projectId}::uuid,${ancestor}) ON CONFLICT DO NOTHING`;
     }
   }
 
@@ -977,16 +977,16 @@ export class DocGridService {
     if (!/^[0-9a-f]{64}$/.test(dto.sha256)) throw new BadRequestException('Некорректная контрольная сумма');
     return this.prisma.$transaction(async tx => {
       await this.requireRepo(tx,ownerId,projectId,'write');
-      const rows = await tx.$queryRaw<any[]>`SELECT id,title,path,sha256,byte_size AS size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${projectId}::uuid AND deleted_at IS NULL FOR UPDATE`;
+      const rows = await tx.$queryRaw<any[]>`SELECT id,title,path,sha256,byte_size AS size FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${projectId}::uuid AND deleted_at IS NULL FOR UPDATE`;
       const row = rows[0];
       if (!row) throw new NotFoundException('Материал не найден');
       if (row.sha256 !== dto.sha256) throw new ConflictException('Содержимое файла не совпадает');
       if (row.path === path) return row; // Retry after a lost successful response.
       if (row.path !== fromPath) throw new ConflictException('Папка файла уже изменилась. Обновите список');
-      const conflicts = await tx.$queryRaw<any[]>`SELECT id FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND path=${path} AND title=${row.title} AND id<>${id}::uuid AND deleted_at IS NULL LIMIT 1`;
+      const conflicts = await tx.$queryRaw<any[]>`SELECT id FROM docgrid_live.docgrid_materials WHERE project_id=${projectId}::uuid AND path=${path} AND title=${row.title} AND id<>${id}::uuid AND deleted_at IS NULL LIMIT 1`;
       if (conflicts.length) throw new ConflictException('В целевой папке уже есть файл с таким именем');
       await this.ensureFolders(tx,projectId,path);
-      await tx.$executeRaw`UPDATE docgrid.docgrid_materials SET path=${path} WHERE id=${id}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_materials SET path=${path} WHERE id=${id}::uuid`;
       await this.event(tx,projectId,ownerId,'material.path.restored','material',id,{fromPath,path,sha256:row.sha256});
       return {...row,path};
     });
@@ -1031,10 +1031,10 @@ export class DocGridService {
       const hash=createHash('sha256').update(file.buffer).digest('hex');
       const check = async (tx: Db) => {
         await this.requireRepo(tx,ownerId,projectId,'write');
-        const existing = await tx.$queryRaw<any[]>`SELECT id,title,path,sha256,extraction_status AS "extractionStatus" FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid AND path=${normalizedPath} AND title=${title} AND deleted_at IS NULL ORDER BY created_at,id`;
+        const existing = await tx.$queryRaw<any[]>`SELECT id,title,path,sha256,extraction_status AS "extractionStatus" FROM docgrid_live.docgrid_materials WHERE project_id=${projectId}::uuid AND path=${normalizedPath} AND title=${title} AND deleted_at IS NULL ORDER BY created_at,id`;
         if (existing.some(row => row.sha256 !== hash)) throw new ConflictException('В папке уже есть файл с этим именем и другим содержимым');
         if (existing[0]) return {...existing[0], reused: true};
-        const total=await tx.$queryRaw<Array<{size:bigint}>>`SELECT ((SELECT COALESCE(sum(byte_size),0) FROM docgrid.docgrid_materials WHERE project_id=${projectId}::uuid)+(SELECT COALESCE(sum(byte_size),0) FROM docgrid.dg_shared_proposals WHERE project_id=${projectId}::uuid AND status='OPEN'))::bigint AS size`;
+        const total=await tx.$queryRaw<Array<{size:bigint}>>`SELECT ((SELECT COALESCE(sum(byte_size),0) FROM docgrid_live.docgrid_materials WHERE project_id=${projectId}::uuid)+(SELECT COALESCE(sum(byte_size),0) FROM docgrid_live.dg_shared_proposals WHERE project_id=${projectId}::uuid AND status='OPEN'))::bigint AS size`;
         if(Number(total[0]?.size || 0)+file.buffer.length>DOCGRID_PROJECT_MAX_BYTES)throw new BadRequestException('В проекте доступно 500 МБ, включая корзину');
         return null;
       };
@@ -1055,7 +1055,7 @@ export class DocGridService {
         const duplicate = await check(tx);
         if (duplicate) return duplicate;
         await this.ensureFolders(tx,projectId,normalizedPath);
-        const rows=await tx.$queryRaw<any[]>`INSERT INTO docgrid.docgrid_materials(project_id,title,path,mime,bytes,storage_key,byte_size,sha256,extracted_text,extraction_status,extraction_reason,created_by) VALUES(${projectId}::uuid,${title},${normalizedPath},${mime},${key ? null : file.buffer}::bytea,${key},${file.buffer.length},${hash},${extracted},${status},${extraction.reason},${ownerId}) RETURNING id,title,path,sha256,extraction_status AS "extractionStatus"`;
+        const rows=await tx.$queryRaw<any[]>`INSERT INTO docgrid_live.docgrid_materials(project_id,title,path,mime,bytes,storage_key,byte_size,sha256,extracted_text,extraction_status,extraction_reason,created_by) VALUES(${projectId}::uuid,${title},${normalizedPath},${mime},${key ? null : file.buffer}::bytea,${key},${file.buffer.length},${hash},${extracted},${status},${extraction.reason},${ownerId}) RETURNING id,title,path,sha256,extraction_status AS "extractionStatus"`;
         await this.event(tx,projectId,ownerId,'material.added','material',rows[0].id,{title,path:normalizedPath,sha256:hash,bytes:file.buffer.length,storage:key?'s3':'database'});return rows[0];
       });
       log('completed', { materialId: result.id });
@@ -1071,7 +1071,7 @@ export class DocGridService {
 
   async material(ownerId:string,projectId:string,id:string) {
     await this.requireRepo(this.prisma,ownerId,projectId);
-    const rows=await this.prisma.$queryRaw<any[]>`SELECT id,title,mime,bytes,storage_key,byte_size,sha256 FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${projectId}::uuid AND deleted_at IS NULL`;
+    const rows=await this.prisma.$queryRaw<any[]>`SELECT id,title,mime,bytes,storage_key,byte_size,sha256 FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${projectId}::uuid AND deleted_at IS NULL`;
     if(!rows[0])throw new NotFoundException('Материал не найден');
     const row = rows[0];
     return {id:row.id,title:row.title,mime:row.mime,sha256:row.sha256,bytes:await readMaterialBytes(row,this.materialStorage)};
@@ -1080,22 +1080,22 @@ export class DocGridService {
   async extractionStatus(user:string,project:string) {
     await this.requireRepo(this.prisma,user,project);
     const jobs=await this.prisma.$queryRaw<any[]>`SELECT j.material_id AS id,m.title,m.path,j.state,j.reason,j.total_pages AS "totalPages",
-      (SELECT count(*)::int FROM docgrid.dg_ocr_pages p WHERE p.material_id=m.id) AS "processedPages",
-      (SELECT count(*)::int FROM docgrid.dg_ocr_pages p WHERE p.material_id=m.id AND p.status<>'READY') AS "unreadPages"
-      FROM docgrid.docgrid_materials m JOIN docgrid.dg_ocr_jobs j ON j.material_id=m.id WHERE m.project_id=${project}::uuid AND m.deleted_at IS NULL ORDER BY m.path,m.title LIMIT 5000`;
+      (SELECT count(*)::int FROM docgrid_live.dg_ocr_pages p WHERE p.material_id=m.id) AS "processedPages",
+      (SELECT count(*)::int FROM docgrid_live.dg_ocr_pages p WHERE p.material_id=m.id AND p.status<>'READY') AS "unreadPages"
+      FROM docgrid_live.docgrid_materials m JOIN docgrid_live.dg_ocr_jobs j ON j.material_id=m.id WHERE m.project_id=${project}::uuid AND m.deleted_at IS NULL ORDER BY m.path,m.title LIMIT 5000`;
     return {enabled:process.env.DOCGRID_OCR_ENABLED!=='false',jobs};
   }
   async retryOcr(user:string,project:string,id:string) {
     return this.prisma.$transaction(async tx=>{
       await this.requireRepo(tx,user,project,'write');
-      const rows=await tx.$queryRaw<any[]>`SELECT title,sha256 FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL FOR UPDATE`;
+      const rows=await tx.$queryRaw<any[]>`SELECT title,sha256 FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL FOR UPDATE`;
       if(!rows[0])throw new NotFoundException('Материал не найден');
       if(!isOcrMaterial(rows[0].title))throw new BadRequestException('OCR поддерживает PDF и изображения');
-      const running=await tx.$queryRaw<any[]>`SELECT state,lease_until FROM docgrid.dg_ocr_jobs WHERE material_id=${id}::uuid FOR UPDATE`;
+      const running=await tx.$queryRaw<any[]>`SELECT state,lease_until FROM docgrid_live.dg_ocr_jobs WHERE material_id=${id}::uuid FOR UPDATE`;
       if(running[0]?.state==='running' && new Date(running[0].lease_until)>new Date())throw new ConflictException('OCR уже выполняется');
-      await tx.$executeRaw`INSERT INTO docgrid.dg_ocr_jobs(material_id,sha256) VALUES(${id}::uuid,${rows[0].sha256})
+      await tx.$executeRaw`INSERT INTO docgrid_live.dg_ocr_jobs(material_id,sha256) VALUES(${id}::uuid,${rows[0].sha256})
         ON CONFLICT(material_id) DO UPDATE SET state='queued',attempts=0,lease_token=NULL,lease_until=NULL,reason=NULL,updated_at=now()`;
-      await tx.$executeRaw`DELETE FROM docgrid.dg_ocr_pages WHERE material_id=${id}::uuid AND status<>'READY'`;
+      await tx.$executeRaw`DELETE FROM docgrid_live.dg_ocr_pages WHERE material_id=${id}::uuid AND status<>'READY'`;
       await this.event(tx,project,user,'material.ocr_queued','material',id,{});
       return {queued:true};
     });
@@ -1103,14 +1103,14 @@ export class DocGridService {
 
   async materialText(user:string,project:string,id:string) {
     await this.requireRepo(this.prisma,user,project);
-    const rows=await this.prisma.$queryRaw<any[]>`SELECT extracted_text AS text,extracted_pages AS pages,extraction_status AS status,extraction_reason AS reason FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    const rows=await this.prisma.$queryRaw<any[]>`SELECT extracted_text AS text,extracted_pages AS pages,extraction_status AS status,extraction_reason AS reason FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
     if(!rows[0])throw new NotFoundException('Материал не найден');
     return rows[0];
   }
   async materialOfficeView(user:string,project:string,id:string) {
     // Check access and size before fetching the original from object storage.
     await this.requireRepo(this.prisma,user,project);
-    const rows=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    const rows=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
     if(!rows[0])throw new NotFoundException('Материал не найден');
     if(Number(rows[0].byte_size)>PDF_EXTRACTION_MAX_BYTES)throw new BadRequestException('Просмотр ограничен файлами до 32 МБ. Оригинал можно скачать.');
     const file=await this.material(user,project,id);
@@ -1118,9 +1118,9 @@ export class DocGridService {
   }
   async reextractMaterial(user:string,project:string,id:string) {
     await this.requireRepo(this.prisma,user,project,'write');
-    const metadata=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
+    const metadata=await this.prisma.$queryRaw<any[]>`SELECT byte_size FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL`;
     if(!metadata[0])throw new NotFoundException('Материал не найден');
-    const type=await this.prisma.$queryRaw<any[]>`SELECT title FROM docgrid.docgrid_materials WHERE id=${id}::uuid`;
+    const type=await this.prisma.$queryRaw<any[]>`SELECT title FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid`;
     if(isOcrMaterial(type[0].title)){await this.retryOcr(user,project,id);return {...await this.materialText(user,project,id),queued:true};}
     if(Number(metadata[0].byte_size)>PDF_EXTRACTION_MAX_BYTES)throw new BadRequestException('Повторная обработка ограничена файлами до 32 МБ. Оригинал и имеющийся текст сохранены.');
 
@@ -1130,10 +1130,10 @@ export class DocGridService {
     if(extracted.reason.endsWith('_busy'))throw new ConflictException('Обработка занята. Повторите позже.');
     return this.prisma.$transaction(async tx=>{
       await this.requireRepo(tx,user,project,'write');
-      const rows=await tx.$queryRaw<any[]>`SELECT extraction_status,extracted_text FROM docgrid.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL AND sha256=${original.sha256} FOR UPDATE`;
+      const rows=await tx.$queryRaw<any[]>`SELECT extraction_status,extracted_text FROM docgrid_live.docgrid_materials WHERE id=${id}::uuid AND project_id=${project}::uuid AND deleted_at IS NULL AND sha256=${original.sha256} FOR UPDATE`;
       if(!rows[0])throw new ConflictException('Материал изменён или удалён');
       if(rows[0].extracted_text && extracted.status==='UNREAD')return {text:rows[0].extracted_text,status:rows[0].extraction_status,reason:extracted.reason,preserved:true};
-      await tx.$executeRaw`UPDATE docgrid.docgrid_materials SET extracted_text=${extracted.text},extraction_status=${extracted.status},extraction_reason=${extracted.reason} WHERE id=${id}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_materials SET extracted_text=${extracted.text},extraction_status=${extracted.status},extraction_reason=${extracted.reason} WHERE id=${id}::uuid`;
       await this.event(tx,project,user,'material.text_extracted','material',id,{status:extracted.status,reason:extracted.reason});
       return extracted;
     });
@@ -1143,8 +1143,8 @@ export class DocGridService {
     return this.prisma.$transaction(async tx=>{
       await this.requireRepo(tx,ownerId,projectId,'write');
       const count=kind==='material'
-        ? await tx.$executeRaw`UPDATE docgrid.docgrid_materials SET deleted_at=CASE WHEN ${restore} THEN NULL ELSE now() END WHERE id=${id}::uuid AND project_id=${projectId}::uuid`
-        : await tx.$executeRaw`UPDATE docgrid.workspace_documents SET docgrid_deleted_at=CASE WHEN ${restore} THEN NULL ELSE now() END WHERE id=${id}::uuid AND project_id=${projectId}::uuid`;
+        ? await tx.$executeRaw`UPDATE docgrid_live.docgrid_materials SET deleted_at=CASE WHEN ${restore} THEN NULL ELSE now() END WHERE id=${id}::uuid AND project_id=${projectId}::uuid`
+        : await tx.$executeRaw`UPDATE docgrid_live.workspace_documents SET docgrid_deleted_at=CASE WHEN ${restore} THEN NULL ELSE now() END WHERE id=${id}::uuid AND project_id=${projectId}::uuid`;
       if(!count)throw new NotFoundException('Файл не найден');
       await this.event(tx,projectId,ownerId,restore?'file.restored':'file.trashed',kind,id);return {ok:true};
     });
@@ -1159,65 +1159,65 @@ export class DocGridService {
 
   async refreshReview(ownerId:string,reviewId:string) {
     return this.prisma.$transaction(async tx=>{
-      const rows=await tx.$queryRaw<any[]>`SELECT project_id AS "projectId",source_branch_id AS "sourceBranchId",target_branch_id AS "targetBranchId",status FROM docgrid.docgrid_reviews WHERE id=${reviewId}::uuid`;
+      const rows=await tx.$queryRaw<any[]>`SELECT project_id AS "projectId",source_branch_id AS "sourceBranchId",target_branch_id AS "targetBranchId",status FROM docgrid_live.docgrid_reviews WHERE id=${reviewId}::uuid`;
       const review=rows[0];if(!review)throw new NotFoundException();
       await this.requireRepo(tx,ownerId,review.projectId,'write');
-      const locked=await tx.$queryRaw<any[]>`SELECT status FROM docgrid.docgrid_reviews WHERE id=${reviewId}::uuid FOR UPDATE`;
+      const locked=await tx.$queryRaw<any[]>`SELECT status FROM docgrid_live.docgrid_reviews WHERE id=${reviewId}::uuid FOR UPDATE`;
       if(!['OPEN','CONFLICT'].includes(locked[0].status))throw new ConflictException('PR уже обработан');
       const changed=(await this.branchStates(tx,review.projectId,review.sourceBranchId,review.targetBranchId)).filter(r=>this.isSourceChange(r));
       const conflict=changed.some(r=>r.baseBranchId!==review.targetBranchId||mergeText(r.baseContent,r.sourceContent??'',r.targetContent??'').conflict);
       const status=conflict?'CONFLICT':'OPEN';
-      await tx.$executeRaw`UPDATE docgrid.docgrid_reviews SET status=${status},source_snapshot=${JSON.stringify(Object.fromEntries(changed.map(r=>[r.documentId,r.sourceRevision??0])))}::jsonb,target_snapshot=${JSON.stringify(Object.fromEntries(changed.map(r=>[r.documentId,r.targetRevision??0])))}::jsonb,updated_at=now() WHERE id=${reviewId}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.docgrid_reviews SET status=${status},source_snapshot=${JSON.stringify(Object.fromEntries(changed.map(r=>[r.documentId,r.sourceRevision??0])))}::jsonb,target_snapshot=${JSON.stringify(Object.fromEntries(changed.map(r=>[r.documentId,r.targetRevision??0])))}::jsonb,updated_at=now() WHERE id=${reviewId}::uuid`;
       await this.event(tx,review.projectId,ownerId,'review.refreshed','review',reviewId,{status});return {id:reviewId,status};
     });
   }
 
   async members(ownerId:string,projectId:string) {
     await this.requireRepo(this.prisma,ownerId,projectId);
-    return this.prisma.$queryRaw<any[]>`SELECT u.email,m.role FROM docgrid.docgrid_members m JOIN docgrid."User" u ON u.id=m.user_id WHERE m.project_id=${projectId}::uuid`;
+    return this.prisma.$queryRaw<any[]>`SELECT u.email,m.role FROM docgrid_live.docgrid_members m JOIN docgrid_live."User" u ON u.id=m.user_id WHERE m.project_id=${projectId}::uuid`;
   }
   async setMember(ownerId:string,projectId:string,email:string,role:string) {
     return this.prisma.$transaction(async tx=>{
       await this.requireRepo(tx,ownerId,projectId,'owner');
-      const users=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM docgrid."User" WHERE lower(email)=${email.trim().toLowerCase()} LIMIT 1`;
+      const users=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM docgrid_live."User" WHERE lower(email)=${email.trim().toLowerCase()} LIMIT 1`;
       if(!users[0])throw new NotFoundException('Пользователь должен сначала войти в DocGrid');
       if(users[0].id===ownerId)throw new BadRequestException('Владелец уже имеет полный доступ');
-      if(role==='REMOVE')await tx.$executeRaw`DELETE FROM docgrid.docgrid_members WHERE project_id=${projectId}::uuid AND user_id=${users[0].id}`;
-      else await tx.$executeRaw`INSERT INTO docgrid.docgrid_members(project_id,user_id,role) VALUES(${projectId}::uuid,${users[0].id},${role}) ON CONFLICT(project_id,user_id) DO UPDATE SET role=EXCLUDED.role`;
+      if(role==='REMOVE')await tx.$executeRaw`DELETE FROM docgrid_live.docgrid_members WHERE project_id=${projectId}::uuid AND user_id=${users[0].id}`;
+      else await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_members(project_id,user_id,role) VALUES(${projectId}::uuid,${users[0].id},${role}) ON CONFLICT(project_id,user_id) DO UPDATE SET role=EXCLUDED.role`;
       await this.event(tx,projectId,ownerId,'access.changed','repository',projectId,{userId:users[0].id,role});return {ok:true};
     });
   }
 
   async comments(ownerId:string,branchId:string,documentId:string) {
     await this.requireBranch(this.prisma,ownerId,branchId);
-    return this.prisma.$queryRaw<any[]>`SELECT c.id,c.body,c.quote,c.revision,c.created_at AS "createdAt",u.email AS author FROM docgrid.docgrid_comments c JOIN docgrid."User" u ON u.id=c.author_id WHERE c.branch_id=${branchId}::uuid AND c.document_id=${documentId}::uuid ORDER BY c.created_at`;
+    return this.prisma.$queryRaw<any[]>`SELECT c.id,c.body,c.quote,c.revision,c.created_at AS "createdAt",u.email AS author FROM docgrid_live.docgrid_comments c JOIN docgrid_live."User" u ON u.id=c.author_id WHERE c.branch_id=${branchId}::uuid AND c.document_id=${documentId}::uuid ORDER BY c.created_at`;
   }
   async addComment(ownerId:string,branchId:string,documentId:string,dto:{body:string;quote?:string;revision:number}) {
     return this.prisma.$transaction(async tx=>{
       const branch=await this.requireBranch(tx,ownerId,branchId);await this.requireRepo(tx,ownerId,branch.projectId,'write');
-      const docs=await tx.$queryRaw<Array<{revision:number;content:string}>>`SELECT revision,content FROM docgrid.docgrid_branch_documents WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
+      const docs=await tx.$queryRaw<Array<{revision:number;content:string}>>`SELECT revision,content FROM docgrid_live.docgrid_branch_documents WHERE branch_id=${branchId}::uuid AND document_id=${documentId}::uuid`;
       if(!docs[0]||docs[0].revision!==dto.revision)throw new ConflictException('Документ изменился');
       if(dto.quote&&!docs[0].content.includes(dto.quote))throw new BadRequestException('Фрагмент отсутствует в документе');
-      const rows=await tx.$queryRaw<any[]>`INSERT INTO docgrid.docgrid_comments(project_id,document_id,branch_id,revision,quote,body,author_id) VALUES(${branch.projectId}::uuid,${documentId}::uuid,${branchId}::uuid,${dto.revision},${dto.quote||''},${dto.body},${ownerId}) RETURNING id`;
+      const rows=await tx.$queryRaw<any[]>`INSERT INTO docgrid_live.docgrid_comments(project_id,document_id,branch_id,revision,quote,body,author_id) VALUES(${branch.projectId}::uuid,${documentId}::uuid,${branchId}::uuid,${dto.revision},${dto.quote||''},${dto.body},${ownerId}) RETURNING id`;
       await this.event(tx,branch.projectId,ownerId,'comment.created','document',documentId,{revision:dto.revision});return rows[0];
     });
   }
 
   async judgments(ownerId:string,projectId:string,branchId:string) {
     await this.requireRepo(this.prisma,ownerId,projectId);
-    return this.prisma.$queryRaw<any[]>`SELECT id,result,created_at AS "createdAt",fingerprint FROM docgrid.docgrid_judgments WHERE project_id=${projectId}::uuid AND source_branch_id=${branchId}::uuid ORDER BY created_at DESC LIMIT 10`;
+    return this.prisma.$queryRaw<any[]>`SELECT id,result,created_at AS "createdAt",fingerprint FROM docgrid_live.docgrid_judgments WHERE project_id=${projectId}::uuid AND source_branch_id=${branchId}::uuid ORDER BY created_at DESC LIMIT 10`;
   }
 
   async adminSummary() {
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT
-        (SELECT COUNT(*) FROM docgrid.workspace_projects) AS repositories,
-        (SELECT COUNT(*) FROM docgrid.docgrid_branches) AS branches,
-        (SELECT COUNT(*) FROM docgrid.docgrid_commits) AS commits,
-        (SELECT COUNT(*) FROM docgrid.docgrid_reviews WHERE status='OPEN') AS "openReviews",
-        (SELECT COUNT(*) FROM docgrid.docgrid_issues WHERE status='OPEN') AS "openIssues",
-        (SELECT COUNT(*) FROM docgrid.docgrid_releases) AS releases,
-        (SELECT MAX(created_at) FROM docgrid.docgrid_events) AS "lastActivityAt"
+        (SELECT COUNT(*) FROM docgrid_live.workspace_projects) AS repositories,
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_branches) AS branches,
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_commits) AS commits,
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_reviews WHERE status='OPEN') AS "openReviews",
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_issues WHERE status='OPEN') AS "openIssues",
+        (SELECT COUNT(*) FROM docgrid_live.docgrid_releases) AS releases,
+        (SELECT MAX(created_at) FROM docgrid_live.docgrid_events) AS "lastActivityAt"
     `;
     const r = rows[0];
     return {
@@ -1234,11 +1234,12 @@ export class DocGridService {
              e.actor_id AS "actorId", u.email AS "actorEmail",
              e.event_type AS "eventType", e.entity_type AS "entityType", e.entity_id AS "entityId",
              e.metadata, e.created_at AS "createdAt"
-      FROM docgrid.docgrid_events e
-      JOIN docgrid.workspace_projects p ON p.id=e.project_id
-      LEFT JOIN docgrid."User" u ON u.id=e.actor_id
+      FROM docgrid_live.docgrid_events e
+      JOIN docgrid_live.workspace_projects p ON p.id=e.project_id
+      LEFT JOIN docgrid_live."User" u ON u.id=e.actor_id
       ORDER BY e.created_at DESC
       LIMIT ${safe}
     `;
   }
 }
+

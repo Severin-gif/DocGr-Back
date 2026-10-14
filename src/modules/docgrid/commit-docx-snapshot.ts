@@ -15,7 +15,7 @@ export async function commitDocxSnapshot(db: any, documentId: string, commitId: 
   if (commitId) {
     const [commit] = await db.$queryRaw`
       SELECT after_content, docx_bytes, docx_sha256, format_version
-      FROM docgrid.docgrid_commits
+      FROM docgrid_live.docgrid_commits
       WHERE id=${commitId}::uuid AND document_id=${documentId}::uuid FOR UPDATE
     `;
     if (!commit || commit.after_content !== content) {
@@ -31,9 +31,10 @@ export async function commitDocxSnapshot(db: any, documentId: string, commitId: 
   }
   if (commitId) {
     await db.$executeRaw`
-      UPDATE docgrid.docgrid_commits SET docx_bytes=${bytes}, docx_sha256=${digest}, format_version=${version}
+      UPDATE docgrid_live.docgrid_commits SET docx_bytes=${bytes}, docx_sha256=${digest}, format_version=${version}
       WHERE id=${commitId}::uuid AND docx_bytes IS NULL
     `;
   }
   return { bytes, digest, version };
 }
+

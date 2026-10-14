@@ -77,8 +77,9 @@ module.exports=async({call,prefix,material,jwt,db})=>{
   await call(prefix+'/agents/grants/'+thread.grantId+'/revoke','POST',{requestKey:randomUUID()},jwt('owner'),201);
   await run(denied,randomUUID(),403);assert.equal((await latest()).status,'failed');
   // Restart recovery: expired lease fails closed when no durable turn exists.
-  await db.$executeRaw`UPDATE docgrid.dg_discussion_workflows SET status='running',steps=jsonb_set(steps,'{0,status}','"running"'),updated_at=now()-interval '11 minutes' WHERE id=${denied.id}::uuid`;
+  await db.$executeRaw`UPDATE docgrid_live.dg_discussion_workflows SET status='running',steps=jsonb_set(steps,'{0,status}','"running"'),updated_at=now()-interval '11 minutes' WHERE id=${denied.id}::uuid`;
   assert.equal((await latest()).status,'failed');
   console.log('PASS discussion workflow: durable plan and events, exact approval, scope, sequential execution, idempotent replay, ordinary chat, separate document approval, failure/retry, cancellation, disabled/revoked grant and restart recovery');
  } finally {await new Promise(r=>server.close(r));delete process.env.DOCGRID_ORCHESTRA_URL;delete process.env.DOCGRID_AI_DAILY_REQUEST_LIMIT;}
 };
+

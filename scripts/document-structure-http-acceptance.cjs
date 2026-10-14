@@ -8,9 +8,9 @@ module.exports=async({call,jwt,base,db})=>{
  const path=(branch,revision)=>root+'/branches/'+branch+'/documents/'+document.id+'/export?revision='+revision+'&format=docx';
  const bytes=async url=>{const r=await fetch(base+url,{headers:{authorization:'Bearer '+jwt('owner')}});assert.equal(r.status,200,await (r.status!==200?r.text():Promise.resolve('')));return Buffer.from(await r.arrayBuffer());};
  const original=await bytes(path(main.id,1));assert.equal(original.subarray(0,2).toString(),'PK');assert.deepEqual(await bytes(path(main.id,1)),original);
- const [stored]=await db.$queryRaw`SELECT docx_bytes,format_version FROM docgrid.docgrid_branch_documents WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ const [stored]=await db.$queryRaw`SELECT docx_bytes,format_version FROM docgrid_live.docgrid_branch_documents WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
  assert.deepEqual(Buffer.from(stored.docx_bytes),original);assert.equal(stored.format_version,'docgrid-structure-v1');
- const [commit]=await db.$queryRaw`SELECT docx_bytes FROM docgrid.docgrid_commits WHERE document_id=${document.id}::uuid`;
+ const [commit]=await db.$queryRaw`SELECT docx_bytes FROM docgrid_live.docgrid_commits WHERE document_id=${document.id}::uuid`;
  assert.deepEqual(Buffer.from(commit.docx_bytes),original);
  const work=await call(root+'/branches','POST',{name:'Правки',fromBranchId:main.id},jwt('owner'),201);
  assert.deepEqual(await bytes(path(work.id,1)),original);
@@ -27,19 +27,19 @@ module.exports=async({call,jwt,base,db})=>{
  const merged=await bytes(path(main.id,current.revision));assert.notDeepEqual(merged,original);
  const zip=await JSZip.loadAsync(merged),xml=await zip.file('word/document.xml').async('string');assert.match(xml,/Новый абзац/);assert.match(xml,/Heading2/);assert.doesNotMatch(xml,/= 40/);
  // Pre-migration records are upgraded without changing their revision or projection.
- await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
  const beforeConversion=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(beforeConversion.fileFormat,'docx','legacy documents open through the DOCX reader');assert.equal(beforeConversion.formatVersion,null);
  const legacy=await bytes(path(main.id,current.revision));assert.deepEqual(await bytes(path(main.id,current.revision)),legacy);
  assert.deepEqual(legacy,merged,'reuse the existing commit instead of rendering legacy branch again');
  const sibling=await call(root+'/branches','POST',{name:'Старая редакция',fromBranchId:main.id},jwt('owner'),201);
- const [head]=await db.$queryRaw`SELECT head_commit_id FROM docgrid.docgrid_branch_documents WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
- await db.$executeRaw`UPDATE docgrid.docgrid_commits SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE id=${head.head_commit_id}::uuid`;
- await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE head_commit_id=${head.head_commit_id}::uuid`;
+ const [head]=await db.$queryRaw`SELECT head_commit_id FROM docgrid_live.docgrid_branch_documents WHERE branch_id=${main.id}::uuid AND document_id=${document.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.docgrid_commits SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE id=${head.head_commit_id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE head_commit_id=${head.head_commit_id}::uuid`;
  // Simultaneous requests from branches that share a legacy commit must converge.
  const converted=await Promise.all([bytes(path(main.id,current.revision)),bytes(path(sibling.id,current.revision))]);
  assert.deepEqual(converted[0],converted[1]);
  assert.deepEqual(await bytes(path(main.id,current.revision)),converted[0]);
- await db.$executeRaw`UPDATE docgrid.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${sibling.id}::uuid AND document_id=${document.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.docgrid_branch_documents SET docx_bytes=NULL,docx_sha256=NULL,format_version=NULL WHERE branch_id=${sibling.id}::uuid AND document_id=${document.id}::uuid`;
  await call('/api/docgrid/branches/'+sibling.id+'/documents/'+document.id,'PUT',{revision:current.revision,content:current.content,message:'Без изменения текста'});
  assert.deepEqual(await bytes(path(sibling.id,current.revision)),converted[0],'unchanged save also reuses the commit');
  const unchanged=(await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id);assert.equal(unchanged.revision,current.revision);assert.equal(unchanged.content,current.content);
@@ -48,3 +48,4 @@ module.exports=async({call,jwt,base,db})=>{
  assert.equal((await call('/api/docgrid/branches/'+main.id+'/documents')).find(d=>d.documentId===document.id).revision,current.revision);
  console.log('PASS persisted DOCX creation/fork/repeat export/history/atomic rejected PR/accepted PR/legacy conversion/draft ACL');
 };
+

@@ -88,7 +88,7 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
         await new Promise<void>((resolve, reject) => {
           const child = spawn(
             "pg_dump",
-            ["--format=custom", "--no-owner", "--no-acl", "--schema=docgrid"],
+            ["--format=custom", "--no-owner", "--no-acl", "--schema=docgrid_live"],
             { env, stdio: ["ignore", output.fd, "ignore"] },
           );
           const timeout = setTimeout(
@@ -145,4 +145,5 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
     return this.status();
   }
 }
+
 

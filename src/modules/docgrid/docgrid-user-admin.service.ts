@@ -30,16 +30,17 @@ export class DocGridUserAdminService {
     if (Object.keys(body).some(key=>!['blocked','reason'].includes(key)) || typeof body.blocked !== 'boolean' || typeof body.reason !== 'string' || !body.reason.trim() || body.reason.length > 500) throw new BadRequestException('Specify blocked and a reason (1–500 characters)');
     const blocked=body.blocked, reason=body.reason.trim();
     return this.prisma.$transaction(async tx=>{
-      const users=await tx.$queryRaw<{id:string;accessBlockedAt:Date|null}[]>`SELECT id,access_blocked_at AS "accessBlockedAt" FROM docgrid."User" WHERE id=${id} FOR UPDATE`;
+      const users=await tx.$queryRaw<{id:string;accessBlockedAt:Date|null}[]>`SELECT id,access_blocked_at AS "accessBlockedAt" FROM docgrid_live."User" WHERE id=${id} FOR UPDATE`;
       if (!users[0]) throw new NotFoundException('User not found');
       if (!!users[0].accessBlockedAt === blocked) return {id,accessBlockedAt:users[0].accessBlockedAt};
       const user=await tx.user.update({where:{id},data:{accessBlockedAt:blocked?new Date():null},select:{id:true,accessBlockedAt:true}});
-      await tx.$executeRaw`INSERT INTO docgrid.dg_user_admin_events(user_id,actor,blocked,reason) VALUES (${id},${actor},${blocked},${reason})`;
+      await tx.$executeRaw`INSERT INTO docgrid_live.dg_user_admin_events(user_id,actor,blocked,reason) VALUES (${id},${actor},${blocked},${reason})`;
       return user;
     });
   }
   async history(id: string) {
     if (!id || id.length > 128) throw new BadRequestException('Invalid user');
-    return this.prisma.$queryRaw`SELECT id,actor,blocked,reason,created_at AS "createdAt" FROM docgrid.dg_user_admin_events WHERE user_id=${id} ORDER BY created_at DESC,id DESC LIMIT 100`;
+    return this.prisma.$queryRaw`SELECT id,actor,blocked,reason,created_at AS "createdAt" FROM docgrid_live.dg_user_admin_events WHERE user_id=${id} ORDER BY created_at DESC,id DESC LIMIT 100`;
   }
 }
+

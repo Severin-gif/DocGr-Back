@@ -98,21 +98,21 @@ export class AstraUploadService {
     if (possibleFolders.size > ASTRA_UPLOAD_LIMITS.maxCreatedFolders) throw new BadRequestException({ code: 'FOLDER_LIMIT_EXCEEDED', maxCreatedFolders: ASTRA_UPLOAD_LIMITS.maxCreatedFolders });
 
     // Uses the caller's existing transaction; the project lock also serializes legacy uploads.
-    const project = await tx.$queryRaw<Array<{ id: string }>>`SELECT p.id FROM docgrid.workspace_projects p WHERE p.id=${ctx.projectId}::uuid
-      AND (p.owner_id=${ctx.ownerId} OR EXISTS(SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ctx.ownerId} AND m.role IN ('EDITOR','REVIEWER'))) FOR UPDATE OF p`;
+    const project = await tx.$queryRaw<Array<{ id: string }>>`SELECT p.id FROM docgrid_live.workspace_projects p WHERE p.id=${ctx.projectId}::uuid
+      AND (p.owner_id=${ctx.ownerId} OR EXISTS(SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${ctx.ownerId} AND m.role IN ('EDITOR','REVIEWER'))) FOR UPDATE OF p`;
     if (!project[0]) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
-    const totals = await tx.$queryRaw<Array<{ size: string }>>`SELECT COALESCE(sum(byte_size),0)::text AS size FROM docgrid.docgrid_materials WHERE project_id=${ctx.projectId}::uuid`;
+    const totals = await tx.$queryRaw<Array<{ size: string }>>`SELECT COALESCE(sum(byte_size),0)::text AS size FROM docgrid_live.docgrid_materials WHERE project_id=${ctx.projectId}::uuid`;
     let projectBytes = Number(totals[0]?.size || 0);
     // Match the source adapter's live-tree bound, including folders and generated artifacts.
     // Reserve missing ancestors with each accepted item so a later bulk insert cannot overflow it.
     const counts = await tx.$queryRaw<Array<{ entries: number }>>`SELECT (
-      (SELECT count(*) FROM docgrid.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND deleted_at IS NULL) +
-      (SELECT count(*) FROM docgrid.workspace_documents WHERE project_id=${ctx.projectId}::uuid AND docgrid_deleted_at IS NULL) +
-      (SELECT count(*) FROM docgrid.dg_astra_documents WHERE project_id=${ctx.projectId}::uuid) +
-      (SELECT count(*) FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid)
+      (SELECT count(*) FROM docgrid_live.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND deleted_at IS NULL) +
+      (SELECT count(*) FROM docgrid_live.workspace_documents WHERE project_id=${ctx.projectId}::uuid AND docgrid_deleted_at IS NULL) +
+      (SELECT count(*) FROM docgrid_live.dg_astra_documents WHERE project_id=${ctx.projectId}::uuid) +
+      (SELECT count(*) FROM docgrid_live.docgrid_folders WHERE project_id=${ctx.projectId}::uuid)
       )::int AS entries`;
     let projectEntries = counts[0].entries;
-    const knownFolders = new Set((await tx.$queryRaw<Array<{ path: string }>>`SELECT path FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid`).map(folder => folder.path));
+    const knownFolders = new Set((await tx.$queryRaw<Array<{ path: string }>>`SELECT path FROM docgrid_live.docgrid_folders WHERE project_id=${ctx.projectId}::uuid`).map(folder => folder.path));
     const accepted: Array<{ index: number; sourceId: string; name: string; path: string; mimeType: string; sha256: string; byteSize: number; extractionStatus: ExtractionStatus; textCharacters: number; duplicate: boolean; warnings: string[] }> = [];
     const folderPaths = new Set<string>(), acceptedFolders: typeof requestedFolders = [];
     const reserveFolders = (paths: string[]) => {
@@ -130,7 +130,7 @@ export class AstraUploadService {
     }
     for (const file of files) {
       const existing = await tx.$queryRaw<Material[]>`SELECT id,sha256,mime AS "mimeType",extraction_status AS "extractionStatus",char_length(extracted_text)::int AS "textCharacters",byte_size::int AS "byteSize"
-        FROM docgrid.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND path=${file.path} AND title=${file.name} AND deleted_at IS NULL ORDER BY created_at,id`;
+        FROM docgrid_live.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND path=${file.path} AND title=${file.name} AND deleted_at IS NULL ORDER BY created_at,id`;
       if (existing.some(row => row.sha256 !== file.hash)) {
         errors.push({ kind: 'file', index: file.index, name: file.name, path: file.path, code: 'PATH_CONFLICT', message: 'An original with different bytes already exists at this path; choose another name' }); continue;
       }
@@ -145,7 +145,7 @@ export class AstraUploadService {
           errors.push({ kind: 'file', index: file.index, name: file.name, path: file.path, code: 'PROJECT_STORAGE_LIMIT', message: 'Project originals exceed 500 MiB including trash' }); continue;
         }
         const key = this.materialStorage?.enabled ? await this.materialStorage.store(ctx.projectId,file.bytes,file.hash,file.mimeType) : null;
-        const rows = await tx.$queryRaw<Material[]>`INSERT INTO docgrid.docgrid_materials(project_id,title,path,mime,bytes,storage_key,byte_size,sha256,extracted_text,extraction_status,created_by)
+        const rows = await tx.$queryRaw<Material[]>`INSERT INTO docgrid_live.docgrid_materials(project_id,title,path,mime,bytes,storage_key,byte_size,sha256,extracted_text,extraction_status,created_by)
           VALUES(${ctx.projectId}::uuid,${file.name},${file.path},${file.mimeType},${key ? null : file.bytes}::bytea,${key},${file.bytes.length},${file.hash},${file.text},${file.status},${ctx.ownerId})
           RETURNING id,sha256,mime AS "mimeType",extraction_status AS "extractionStatus",char_length(extracted_text)::int AS "textCharacters",byte_size::int AS "byteSize"`;
         material = rows[0]; projectBytes += file.bytes.length; projectEntries++;
@@ -158,10 +158,10 @@ export class AstraUploadService {
     let folders: Array<{ id: string; path: string }> = [];
     if (folderPaths.size) {
       const paths = JSON.stringify([...folderPaths].sort());
-      await tx.$executeRaw`INSERT INTO docgrid.docgrid_folders(project_id,path) SELECT ${ctx.projectId}::uuid,jsonb_array_elements_text(${paths}::jsonb) ON CONFLICT(project_id,path) DO NOTHING`;
-      folders = await tx.$queryRaw<Array<{ id: string; path: string }>>`SELECT id,path FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid AND path IN (SELECT jsonb_array_elements_text(${paths}::jsonb)) ORDER BY path`;
+      await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_folders(project_id,path) SELECT ${ctx.projectId}::uuid,jsonb_array_elements_text(${paths}::jsonb) ON CONFLICT(project_id,path) DO NOTHING`;
+      folders = await tx.$queryRaw<Array<{ id: string; path: string }>>`SELECT id,path FROM docgrid_live.docgrid_folders WHERE project_id=${ctx.projectId}::uuid AND path IN (SELECT jsonb_array_elements_text(${paths}::jsonb)) ORDER BY path`;
     }
-    await tx.$executeRaw`INSERT INTO docgrid.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata)
+    await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata)
       VALUES(${ctx.projectId}::uuid,${ctx.ownerId},'astra.sources.uploaded','astra_operation',${ctx.operationId}::uuid,
       ${JSON.stringify({ grantId: ctx.grantId, agentRef: ctx.agentRef, runId: ctx.runId, traceId: ctx.traceId,
         accepted: accepted.map(file => ({ sourceId: file.sourceId, sha256: file.sha256, byteSize: file.byteSize, duplicate: file.duplicate })), errors: errors.map(error => ({ kind: error.kind, index: error.index, code: error.code })), folders: folders.map(folder => folder.path) })}::jsonb)`;
@@ -183,4 +183,5 @@ export const ASTRA_UPLOAD_SCHEMAS: Record<string, { description: string; inputSc
     } },
   },
 };
+
 

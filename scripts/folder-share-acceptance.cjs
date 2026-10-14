@@ -43,7 +43,7 @@ module.exports=async({call,jwt,base,db})=>{
  await call(revRoot+'/proposals','POST',payload,guest,404);
  await call(root+'/shared-proposals/'+revPr.id+'/decide','POST',{action:'MERGE'},owner,409);
  await call(root+'/shared-proposals/'+revPr.id+'/decide','POST',{action:'CLOSE'},owner,201);
- await db.$executeRaw`UPDATE docgrid.dg_folder_shares SET expires_at=now()-interval '1 second' WHERE id=${reader.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.dg_folder_shares SET expires_at=now()-interval '1 second' WHERE id=${reader.id}::uuid`;
  await call(readRoot,'GET',undefined,null,404);
  // Main revisions remain untouched until acceptance. Stale PR never overwrites newer work.
  const edit={kind:'EDIT',fileKind:'document',id:doc.id,baseHash:working.baseHash,title:'Edit working DOCX',content:'<!-- docgrid-richtext-v1 --><p>Новый текст</p>'};
@@ -92,3 +92,4 @@ module.exports=async({call,jwt,base,db})=>{
  await call(root,'DELETE',undefined,owner);
  console.log('PASS shared folders: anonymous scoped reads, auth-only proposals, READ restriction, revocation/expiry, owner acceptance, atomic moves, stale edits, immutable originals, staged additions, XLSX cells/styles/formulas, collision rollback');
 };
+

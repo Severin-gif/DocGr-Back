@@ -41,7 +41,7 @@ describe('DocGrid core', () => {
       $queryRaw: jest.fn(async (sql: TemplateStringsArray) => {
         const query = sql.join('?');
         if (query.includes('sum(byte_size)')) return [{size:0n}];
-        if (query.includes('INSERT INTO docgrid.docgrid_materials')) return [{id:'material-id',title:'large.bin',path:'/',sha256:'hash',extractionStatus:'UNREAD'}];
+        if (query.includes('INSERT INTO docgrid_live.docgrid_materials')) return [{id:'material-id',title:'large.bin',path:'/',sha256:'hash',extractionStatus:'UNREAD'}];
         return [];
       }),
     };
@@ -73,4 +73,5 @@ describe('DocGrid core', () => {
     expect(a).not.toBe(c);
   });
 });
+
 

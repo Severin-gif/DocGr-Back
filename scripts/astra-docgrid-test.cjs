@@ -38,11 +38,11 @@ function adapter(client, transact) {
       params.push(v);return col(k)+'=$'+params.length;
     }).join(' AND ') || 'TRUE';
     const model = {
-      create: async({data})=>{const keys=Object.keys(data),values=keys.map(k=>value(k,data[k]));return row((await client.query(`INSERT INTO docgrid.${table} (${keys.map(col).join(',')}) VALUES (${keys.map((_,i)=>'$'+(i+1)).join(',')}) RETURNING *`,values)).rows[0]);},
-      update: async({where:w,data})=>{const keys=Object.keys(data),values=keys.map(k=>value(k,data[k]));const set=keys.map((k,i)=>col(k)+'=$'+(i+1)).join(',');const condition=where(w,values);return row((await client.query(`UPDATE docgrid.${table} SET ${set} WHERE ${condition} RETURNING *`,values)).rows[0]);},
-      updateMany: async({where:w,data})=>{const keys=Object.keys(data),values=keys.map(k=>value(k,data[k]));const set=keys.map((k,i)=>col(k)+'=$'+(i+1)).join(',');const condition=where(w,values);const r=await client.query(`UPDATE docgrid.${table} SET ${set} WHERE ${condition}`,values);return {count:r.affectedRows??r.rowCount};},
-      findUnique: async({where:w})=>{const values=[];const condition=where(w,values);return row((await client.query(`SELECT * FROM docgrid.${table} WHERE ${condition} LIMIT 1`,values)).rows[0])||null;},
-      findMany: async({where:w,orderBy,take=100})=>{const values=[];const condition=where(w,values);const order=Object.entries(orderBy||{}).map(([k,v])=>col(k)+' '+(v==='desc'?'DESC':'ASC')).join(',');return (await client.query(`SELECT * FROM docgrid.${table} WHERE ${condition}${order?' ORDER BY '+order:''} LIMIT ${Number(take)}`,values)).rows.map(row);},
+      create: async({data})=>{const keys=Object.keys(data),values=keys.map(k=>value(k,data[k]));return row((await client.query(`INSERT INTO docgrid_live.${table} (${keys.map(col).join(',')}) VALUES (${keys.map((_,i)=>'$'+(i+1)).join(',')}) RETURNING *`,values)).rows[0]);},
+      update: async({where:w,data})=>{const keys=Object.keys(data),values=keys.map(k=>value(k,data[k]));const set=keys.map((k,i)=>col(k)+'=$'+(i+1)).join(',');const condition=where(w,values);return row((await client.query(`UPDATE docgrid_live.${table} SET ${set} WHERE ${condition} RETURNING *`,values)).rows[0]);},
+      updateMany: async({where:w,data})=>{const keys=Object.keys(data),values=keys.map(k=>value(k,data[k]));const set=keys.map((k,i)=>col(k)+'=$'+(i+1)).join(',');const condition=where(w,values);const r=await client.query(`UPDATE docgrid_live.${table} SET ${set} WHERE ${condition}`,values);return {count:r.affectedRows??r.rowCount};},
+      findUnique: async({where:w})=>{const values=[];const condition=where(w,values);return row((await client.query(`SELECT * FROM docgrid_live.${table} WHERE ${condition} LIMIT 1`,values)).rows[0])||null;},
+      findMany: async({where:w,orderBy,take=100})=>{const values=[];const condition=where(w,values);const order=Object.entries(orderBy||{}).map(([k,v])=>col(k)+' '+(v==='desc'?'DESC':'ASC')).join(',');return (await client.query(`SELECT * FROM docgrid_live.${table} WHERE ${condition}${order?' ORDER BY '+order:''} LIMIT ${Number(take)}`,values)).rows.map(row);},
     }; model.findFirst=model.findUnique; db[name]=model;
   }
   return db;
@@ -61,18 +61,18 @@ function adapter(client, transact) {
   }
   const exec = sql => database.exec ? database.exec(sql) : database.query(sql);
   try {
-    const existing=await database.query("SELECT to_regclass('docgrid.workspace_projects') AS existing");
+    const existing=await database.query("SELECT to_regclass('docgrid_live.workspace_projects') AS existing");
     assert.equal(existing.rows[0].existing,null,'Acceptance database must be empty; no existing data is removed');
-    await exec(`CREATE SCHEMA docgrid; SET search_path=docgrid; CREATE TABLE docgrid."User"(id TEXT PRIMARY KEY,email TEXT);
-      CREATE TABLE docgrid.workspace_projects(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),owner_id TEXT REFERENCES docgrid."User"(id),name TEXT,description TEXT,created_at TIMESTAMPTZ DEFAULT now(),updated_at TIMESTAMPTZ DEFAULT now());
-      CREATE TABLE docgrid.workspace_documents(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),project_id UUID REFERENCES docgrid.workspace_projects(id),title TEXT,path TEXT,content TEXT,version INT DEFAULT 1,updated_at TIMESTAMPTZ DEFAULT now());
-      CREATE TABLE docgrid.workspace_document_versions(document_id UUID REFERENCES docgrid.workspace_documents(id),version INT,content TEXT,author_id TEXT,message TEXT,created_at TIMESTAMPTZ DEFAULT now(),PRIMARY KEY(document_id,version));
-      INSERT INTO docgrid."User" VALUES('owner','owner@example.test'),('stranger','stranger@example.test');`);
-    for(const migration of ['20260918213000_add_docgrid_gitlaw','20260921170000_docgrid_core','20260924220000_docgrid_material_storage','20260921100000_add_document_workflow','20260925121500_docgrid_agent_oauth',...fs.readdirSync('prisma/migrations').filter(p=>/astra_/.test(p)).sort(),'20260929100000_docgrid_builtin_and_extraction','20260929140000_docgrid_ocr_search','20261008174500_document_docx_structure','20261011093000_docgrid_user_admin'])await exec(fs.readFileSync(`prisma/migrations/${migration}/migration.sql`,'utf8'));
+    await exec(`CREATE SCHEMA docgrid_live; SET search_path=docgrid_live; CREATE TABLE docgrid_live."User"(id TEXT PRIMARY KEY,email TEXT);
+      CREATE TABLE docgrid_live.workspace_projects(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),owner_id TEXT REFERENCES docgrid_live."User"(id),name TEXT,description TEXT,created_at TIMESTAMPTZ DEFAULT now(),updated_at TIMESTAMPTZ DEFAULT now());
+      CREATE TABLE docgrid_live.workspace_documents(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),project_id UUID REFERENCES docgrid_live.workspace_projects(id),title TEXT,path TEXT,content TEXT,version INT DEFAULT 1,updated_at TIMESTAMPTZ DEFAULT now());
+      CREATE TABLE docgrid_live.workspace_document_versions(document_id UUID REFERENCES docgrid_live.workspace_documents(id),version INT,content TEXT,author_id TEXT,message TEXT,created_at TIMESTAMPTZ DEFAULT now(),PRIMARY KEY(document_id,version));
+      INSERT INTO docgrid_live."User" VALUES('owner','owner@example.test'),('stranger','stranger@example.test');`);
+    for(const migration of ['20260918213000_add_docgrid_gitlaw','20260921170000_docgrid_core','20260924220000_docgrid_material_storage','20260921100000_add_document_workflow','20260925121500_docgrid_agent_oauth',...fs.readdirSync('prisma/live/migrations').filter(p=>/astra_/.test(p)).sort(),'20260929100000_docgrid_builtin_and_extraction','20260929140000_docgrid_ocr_search','20261008174500_document_docx_structure','20261011093000_docgrid_user_admin'])await exec(fs.readFileSync(`prisma/live/migrations/${migration}/migration.sql`,'utf8'));
     const projectId=randomUUID(), otherProject=randomUUID(), sourceId=randomUUID(), unreadId=randomUUID();
-    await database.query('INSERT INTO docgrid.workspace_projects(id,owner_id,name) VALUES($1,\'owner\',\'Synthetic case\'),($2,\'stranger\',\'Other case\')',[projectId,otherProject]);
+    await database.query('INSERT INTO docgrid_live.workspace_projects(id,owner_id,name) VALUES($1,\'owner\',\'Synthetic case\'),($2,\'stranger\',\'Other case\')',[projectId,otherProject]);
     const text='Источник. '.repeat(3000)+'100.10\n200.20'; const original=Buffer.from(text);
-    for(const [id,bytes,extracted,status,title] of [[sourceId,original,text,'PARTIAL','Выписка.txt'],[unreadId,Buffer.from('%PDF-synthetic'),'','UNREAD','Скан.pdf']])await database.query('INSERT INTO docgrid.docgrid_materials(id,project_id,title,mime,bytes,sha256,extracted_text,extraction_status,created_by) VALUES($1,$2,$3,\'text/plain\',$4,$5,$6,$7,\'owner\')',[id,projectId,title,bytes,sha(bytes),extracted,status]);
+    for(const [id,bytes,extracted,status,title] of [[sourceId,original,text,'PARTIAL','Выписка.txt'],[unreadId,Buffer.from('%PDF-synthetic'),'','UNREAD','Скан.pdf']])await database.query('INSERT INTO docgrid_live.docgrid_materials(id,project_id,title,mime,bytes,sha256,extracted_text,extraction_status,created_by) VALUES($1,$2,$3,\'text/plain\',$4,$5,$6,$7,\'owner\')',[id,projectId,title,bytes,sha(bytes),extracted,status]);
     const storage=new Map();let failPdf=true,pdfAttempts=0;
     const files=new DocumentFileService({putObject:async(bytes,key)=>{storage.set(key,Buffer.from(bytes));},getObject:async key=>{if(!storage.has(key))throw new (require('@nestjs/common').InternalServerErrorException)('S3 download failed (404).');return storage.get(key);}});
     files.convertDocxToPdf=async()=>{pdfAttempts++;if(failPdf)throw Error('synthetic converter unavailable');return Buffer.from('%PDF-synthetic-proof');};
@@ -100,7 +100,7 @@ function adapter(client, transact) {
     const exchanges=await Promise.allSettled([oauthStore.consume({codeHash,bindingHash}),oauthStore.consume({codeHash,bindingHash})]);
     assert.equal(exchanges.filter(x=>x.status==='fulfilled').length,1,'authorization code consumes atomically once');
     await oauthStore.save({codeHash:sha('expired'),bindingHash,sealedToken:'encrypted-only'});
-    await database.query('UPDATE docgrid.dg_agent_oauth_codes SET expires_at=now()-interval \'1 second\'');
+    await database.query('UPDATE docgrid_live.dg_agent_oauth_codes SET expires_at=now()-interval \'1 second\'');
     await assert.rejects(()=>oauthStore.consume({codeHash:sha('expired'),bindingHash}),e=>e.getStatus()===401);
 
     assert.equal((await service.createGrant('owner',projectId,grantBody)).token,null,'secret shown once');
@@ -111,11 +111,11 @@ function adapter(client, transact) {
     const uploadInput={files:[{name:'Fixture.txt',path:'/Incoming/nested',mimeType:'text/plain',contentBase64:Buffer.from('fixture original').toString('base64')}]};
     const uploaded=await call('docgrid_upload_sources',uploadInput,'upload-once');
     assert.equal((await call('docgrid_upload_sources',uploadInput,'upload-once')).id,uploaded.id);
-    const uploadAudit=(await database.query('SELECT input FROM docgrid.dg_astra_operations WHERE id=$1',[uploaded.id])).rows[0].input;
+    const uploadAudit=(await database.query('SELECT input FROM docgrid_live.dg_astra_operations WHERE id=$1',[uploaded.id])).rows[0].input;
     assert.equal(JSON.stringify(uploadAudit).includes(uploadInput.files[0].contentBase64),false,'operation audit must not duplicate original bytes');
     const snap=await call('docgrid_get_snapshot',{capture:true},'capture');
     assert.equal((await call('docgrid_get_snapshot',{capture:true},'capture')).id,snap.id);
-    assert.equal((await database.query('SELECT count(*)::int AS n FROM docgrid.dg_astra_snapshots')).rows[0].n,1);
+    assert.equal((await database.query('SELECT count(*)::int AS n FROM docgrid_live.dg_astra_snapshots')).rows[0].n,1);
     const ref=snap.output.manifest.find(s=>s.sourceId===sourceId).sourceRef;
     const unread=snap.output.manifest.find(s=>s.sourceId===unreadId).sourceRef;
     const read=await call('docgrid_read_source',{sourceRef:ref,maxChars:100});
@@ -130,7 +130,7 @@ function adapter(client, transact) {
     const content={title:'Справка',sections:[{id:'section1',heading:'Данные',paragraphIds:['p1'],paragraphs:['Сумма по исходным сведениям.'],tables:[{id:'table1',headers:['Основание','Сумма'],rows:[['Первый платеж','100,10'],['Второй платеж','200,20']]}]}]};
     const submitInput=()=>({taskId:plan.output.taskId,planRevision:plan.output.planRevision,planDigest:plan.output.planDigest,content});
     await assert.rejects(()=>call('docgrid_submit_document',submitInput()),e=>e.getStatus()===409);
-    assert.equal((await database.query('SELECT count(*)::int AS n FROM docgrid.prepared_legal_documents')).rows[0].n,0);
+    assert.equal((await database.query('SELECT count(*)::int AS n FROM docgrid_live.prepared_legal_documents')).rows[0].n,0);
     assert.equal(storage.size,0);
     const oldPlan=plan;plan=await call('docgrid_plan_document',{...planInput,taskId:oldPlan.output.taskId,basePlanRevision:1,purpose:'Уточнить синтетическую справку'});
     await assert.rejects(()=>approve(oldPlan),e=>e.getStatus()===409);
@@ -143,7 +143,7 @@ function adapter(client, transact) {
     await assert.rejects(()=>service.listArtifacts('stranger',projectId),e=>e.getStatus()===404);
     assert.equal(result.output.stableUrl,`/projects/${projectId}?section=files&artifactId=${artifactId}&version=1`);
 
-    assert.equal((await database.query('SELECT count(*)::int AS n FROM docgrid.document_versions')).rows[0].n,1);
+    assert.equal((await database.query('SELECT count(*)::int AS n FROM docgrid_live.document_versions')).rows[0].n,1);
     const human=await service.humanArtifact('owner',projectId,artifactId,1);assert.equal(human.title,'Справка');
     const patch1=await call('docgrid_propose_patch',{artifactId,baseVersion:1,changes:[{blockId:'p1',type:'replace_paragraph',text:'Первая правка.'}]});
     const patch2=await call('docgrid_propose_patch',{artifactId,baseVersion:1,changes:[{blockId:'p1',type:'replace_paragraph',text:'Параллельная правка.'}]});
@@ -151,7 +151,7 @@ function adapter(client, transact) {
     assert.equal(patchDecisions.filter(p=>p.status==='fulfilled').length,1);
     assert.equal(patchDecisions.find(p=>p.status==='rejected').reason.getStatus(),409);
     const exported=await call('docgrid_export_version',{artifactId,version:2,format:'both'});assert.equal(exported.output.exportStatus,'PREVIEW_FAILED');assert.ok(exported.output.docxUrl);assert.equal(exported.output.pdfUrl,null);
-    const docxKey=(await database.query('SELECT docx_object_key FROM docgrid.document_versions WHERE document_id=$1 AND version=2',[artifactId])).rows[0].docx_object_key;
+    const docxKey=(await database.query('SELECT docx_object_key FROM docgrid_live.document_versions WHERE document_id=$1 AND version=2',[artifactId])).rows[0].docx_object_key;
     const docxHash=sha(storage.get(docxKey));failPdf=false;
     const retried=await call('docgrid_export_version',{artifactId,version:2,format:'both'});assert.equal(retried.output.exportStatus,'READY');assert.equal(sha(storage.get(docxKey)),docxHash);assert.equal(pdfAttempts,2);
     const download=await service.artifactFile('owner',false,projectId,artifactId,2,'docx');assert.equal(sha(download.bytes),docxHash);
@@ -162,7 +162,7 @@ function adapter(client, transact) {
     await assert.rejects(()=>call('docgrid_get_snapshot',{capture:true},'capture'),e=>e.getStatus()===403);
     await assert.rejects(()=>service.artifactFile(token,true,projectId,artifactId,2,'docx'),e=>e.getStatus()===403);
     assert.equal(sha((await service.artifactFile('owner',false,projectId,artifactId,2,'docx')).bytes),docxHash,'human retains own artifacts after revocation');
-    assert.equal((await database.query('SELECT sha256 FROM docgrid.docgrid_materials WHERE id=$1',[sourceId])).rows[0].sha256,sha(original));
+    assert.equal((await database.query('SELECT sha256 FROM docgrid_live.docgrid_materials WHERE id=$1',[sourceId])).rows[0].sha256,sha(original));
     const capped=await service.createGrant('owner',projectId,{...grantBody,requestKey:'cap',maxOperations:1});
     const capResults=await Promise.allSettled([1,2].map(i=>service.execute(capped.token,'docgrid_get_project',{projectId,runId:'cap',traceId:'cap-'+i,input:{}})));
     assert.equal(capResults.filter(p=>p.status==='fulfilled').length,1);
@@ -170,3 +170,4 @@ function adapter(client, transact) {
     console.log(`PASS ASTRA synthetic acceptance — ${mode}: scoped grants, snapshot integrity, partial continuation, stale approval, one version on duplicate submit, concurrent CAS conflict, PDF failure/retry, protected downloads, revoke and budget cap.`);
   } finally { await close(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});
+

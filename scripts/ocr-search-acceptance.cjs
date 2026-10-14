@@ -3,7 +3,7 @@ const {randomUUID,createHash}=require('node:crypto');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {execFileSync}=require('node:child_process');
 module.exports=async function({call,prefix,p,jwt,db,app}) {
- const [owner]=await db.$queryRaw`SELECT owner_id FROM docgrid.workspace_projects WHERE id=${p.id}::uuid`;
+ const [owner]=await db.$queryRaw`SELECT owner_id FROM docgrid_live.workspace_projects WHERE id=${p.id}::uuid`;
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dg-ocr-test-'));
  try {
   execFileSync('python3',['-c',`from PIL import Image,ImageDraw,ImageFont
@@ -15,7 +15,7 @@ d.text((50,170),'ООО Ромашка. Проверка документов.',
 im.save(sys.argv[1]+'/scan.png'); im.save(sys.argv[1]+'/scan.pdf',save_all=True,append_images=[im])`,dir]);
   async function material(title,bytes,text='',status='UNREAD') {
    const id=randomUUID(),hash=createHash('sha256').update(bytes).digest('hex');
-   await db.$executeRaw`INSERT INTO docgrid.docgrid_materials(id,project_id,title,path,mime,bytes,byte_size,sha256,extracted_text,extraction_status,created_by) VALUES(${id}::uuid,${p.id}::uuid,${title},'/OCR','application/octet-stream',${bytes}::bytea,${bytes.length},${hash},${text},${status},${owner.owner_id})`;
+   await db.$executeRaw`INSERT INTO docgrid_live.docgrid_materials(id,project_id,title,path,mime,bytes,byte_size,sha256,extracted_text,extraction_status,created_by) VALUES(${id}::uuid,${p.id}::uuid,${title},'/OCR','application/octet-stream',${bytes}::bytea,${bytes.length},${hash},${text},${status},${owner.owner_id})`;
    return {id,hash};
   }
   const png=await material('scan.png',fs.readFileSync(path.join(dir,'scan.png')));
@@ -26,25 +26,25 @@ im.save(sys.argv[1]+'/scan.png'); im.save(sys.argv[1]+'/scan.pdf',save_all=True,
   await worker.enqueue();
   // Other acceptance suites also leave PDF fixtures in the global queue.
   // Give these two fixtures explicit priority instead of relying on UUID ordering.
-  await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id IN (${png.id}::uuid,${pdf.id}::uuid)`;
+  await db.$executeRaw`UPDATE docgrid_live.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id IN (${png.id}::uuid,${pdf.id}::uuid)`;
   // Simulate a terminated worker: page 1 is durable, lease expired; page 2 must resume.
-  await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET state='running',attempts=1,lease_until=now()-interval '1 minute',lease_token=${randomUUID()}::uuid WHERE material_id=${pdf.id}::uuid`;
-  await db.$executeRaw`INSERT INTO docgrid.dg_ocr_pages(material_id,page,text,method,status) VALUES(${pdf.id}::uuid,1,'Сохранённая первая страница','ocr','READY')`;
+  await db.$executeRaw`UPDATE docgrid_live.dg_ocr_jobs SET state='running',attempts=1,lease_until=now()-interval '1 minute',lease_token=${randomUUID()}::uuid WHERE material_id=${pdf.id}::uuid`;
+  await db.$executeRaw`INSERT INTO docgrid_live.dg_ocr_pages(material_id,page,text,method,status) VALUES(${pdf.id}::uuid,1,'Сохранённая первая страница','ocr','READY')`;
   await worker.tick();await worker.tick();
   const text=await call(prefix+'/materials/'+png.id+'/text');
   assert.equal(text.status,'READY');assert.match(text.text,/125000/);assert.match(text.text,/Задолженность/);assert.equal(text.pages[0].page,1);
   const resumed=await call(prefix+'/materials/'+pdf.id+'/text');assert.equal(resumed.pages.length,2);assert.ok(resumed.text.startsWith('Сохранённая первая страница'));assert.match(resumed.text,/125000/);
-  const original=await db.$queryRaw`SELECT sha256,bytes FROM docgrid.docgrid_materials WHERE id=${pdf.id}::uuid`;assert.equal(createHash('sha256').update(original[0].bytes).digest('hex'),pdf.hash);
+  const original=await db.$queryRaw`SELECT sha256,bytes FROM docgrid_live.docgrid_materials WHERE id=${pdf.id}::uuid`;assert.equal(createHash('sha256').update(original[0].bytes).digest('hex'),pdf.hash);
   const jobs=(await call(prefix+'/extraction')).jobs;assert.equal(jobs.find(j=>j.id===pdf.id).state,'done');
   await call(prefix+'/materials/'+pdf.id+'/ocr','POST',{},jwt('reader'),404);
   // An unread page cannot erase an earlier extraction or be represented as a complete scan.
   const broken=await material('broken.pdf',Buffer.from('%PDF-broken'),'Preserved evidence','READY');
   await worker.enqueue();
   for(let attempt=1;attempt<=3;attempt++){
-   await db.$executeRaw`UPDATE docgrid.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id=${broken.id}::uuid`;
+   await db.$executeRaw`UPDATE docgrid_live.dg_ocr_jobs SET updated_at=now()-interval '1 day' WHERE material_id=${broken.id}::uuid`;
    await worker.tick();
    assert.equal((await call(prefix+'/materials/'+broken.id+'/text')).text,'Preserved evidence');
-   const [brokenJob]=await db.$queryRaw`SELECT state,attempts,reason FROM docgrid.dg_ocr_jobs WHERE material_id=${broken.id}::uuid`;
+   const [brokenJob]=await db.$queryRaw`SELECT state,attempts,reason FROM docgrid_live.dg_ocr_jobs WHERE material_id=${broken.id}::uuid`;
    assert.equal(brokenJob.attempts,attempt);assert.equal(brokenJob.reason,'ocr_processing_failed');assert.equal(brokenJob.state,attempt<3?'queued':'failed');
   }
   // Relevant evidence after the old 5,000-character cutoff and after the first 20 files.
@@ -87,10 +87,11 @@ im.save(sys.argv[1]+'/scan.png'); im.save(sys.argv[1]+'/scan.pdf',save_all=True,
     const turns=await call(prefix+'/discussions/'+thread.id+'/turns');assert.equal(turns[0].context.retrieval.algorithm,'russian-simple-passages-v1');assert.ok(turns[0].context.total>20);
   } finally {await new Promise(resolve=>orchestra.close(resolve));delete process.env.DOCGRID_ORCHESTRA_URL;}
   // Search is immutable even when live extraction is replaced.
-  await db.$executeRaw`UPDATE docgrid.docgrid_materials SET extracted_text='changed' WHERE id=${long.id}::uuid`;
+  await db.$executeRaw`UPDATE docgrid_live.docgrid_materials SET extracted_text='changed' WHERE id=${long.id}::uuid`;
   assert.ok(output(await invoke('docgrid_search',{snapshotId:snapshot.snapshotId,query:'уникальныйфакт',mode:'ranked'})).matches.some(m=>m.sourceRef.sourceId===long.id));
   await call(prefix+'/agents/grants/'+scoped.grant.id+'/revoke','POST',{requestKey:randomUUID()},jwt('owner'),201);
   await invoke('docgrid_search',{snapshotId:snapshot.snapshotId,query:'задолженность',mode:'ranked'},scoped.token,403);
   console.log('PASS real Russian OCR, scanned PDF pages, expired lease resume, preserved originals/text, project ACL, ranked full-case tail retrieval, scoped grants, page locators, pagination and immutable snapshots');
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 };
+

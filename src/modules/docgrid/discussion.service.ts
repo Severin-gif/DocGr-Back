@@ -34,7 +34,7 @@ export class DiscussionService {
   }
   async config(user:string,project:string) {
     const access=await this.agents.builtinAccess(user,project),provider=await this.providerConfig();
-    const rows=await this.db.$queryRaw<any[]>`SELECT requests FROM docgrid.dg_ai_daily_usage WHERE user_id=${user} AND day=(now() AT TIME ZONE 'UTC')::date`;
+    const rows=await this.db.$queryRaw<any[]>`SELECT requests FROM docgrid_live.dg_ai_daily_usage WHERE user_id=${user} AND day=(now() AT TIME ZONE 'UTC')::date`;
     const limit=this.dailyLimit(),used=rows[0]?.requests||0;
     return {...access,...provider,time:await this.timeBudget.status(project),connectionMessage:access.isOwner?provider.connectionMessage:undefined,limit,used,remaining:Math.max(0,limit-used),resetAt:new Date(Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate()+1)).toISOString()};
   }
@@ -48,26 +48,26 @@ export class DiscussionService {
   }
   private async thread(user:string,project:string,id:string){
     await this.agents.getCatalog(user,project);
-    const rows=await this.db.$queryRaw<any[]>`SELECT * FROM docgrid.dg_discussions WHERE id=${id}::uuid AND project_id=${project}::uuid AND owner_id=${user}`;
+    const rows=await this.db.$queryRaw<any[]>`SELECT * FROM docgrid_live.dg_discussions WHERE id=${id}::uuid AND project_id=${project}::uuid AND owner_id=${user}`;
     if(!rows[0])throw new NotFoundException('Обсуждение не найдено');return rows[0];
   }
   async list(user:string,project:string){
     await this.agents.getCatalog(user,project);
-    return this.db.$queryRaw<any[]>`SELECT id,title,grant_id AS "grantId",created_at AS "createdAt" FROM docgrid.dg_discussions WHERE project_id=${project}::uuid AND owner_id=${user} ORDER BY created_at DESC LIMIT 100`;
+    return this.db.$queryRaw<any[]>`SELECT id,title,grant_id AS "grantId",created_at AS "createdAt" FROM docgrid_live.dg_discussions WHERE project_id=${project}::uuid AND owner_id=${user} ORDER BY created_at DESC LIMIT 100`;
   }
   async create(user:string,project:string,raw:unknown){
     const r=objectInput(raw);assertKeys(r,['title','grantId']);const title=stringInput(r,'title',180);
     const grantId=r.grantId?uuidInput(r,'grantId'):(await this.agents.createBuiltinGrant(user,project)).id;
     if(r.grantId){const grants=await this.agents.listGrants(user,project),grant=grants.grants.find(g=>g.id===grantId);
     if(!grant||grant.revokedAt||new Date(grant.expiresAt).getTime()<=Date.now())throw new BadRequestException('Выберите действующий доступ LLM');}
-    const rows=await this.db.$queryRaw<any[]>`INSERT INTO docgrid.dg_discussions(project_id,owner_id,grant_id,title) VALUES(${project}::uuid,${user},${grantId}::uuid,${title}) RETURNING id,title,grant_id AS "grantId"`;
+    const rows=await this.db.$queryRaw<any[]>`INSERT INTO docgrid_live.dg_discussions(project_id,owner_id,grant_id,title) VALUES(${project}::uuid,${user},${grantId}::uuid,${title}) RETURNING id,title,grant_id AS "grantId"`;
     return rows[0];
   }
   async turns(user:string,project:string,id:string){
     await this.thread(user,project,id);
     // A terminated process must not leave a conversation permanently blocked.
-    await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET status='failed',error='Запрос прерван. Отправьте сообщение повторно.',updated_at=now() WHERE discussion_id=${id}::uuid AND status='running' AND updated_at<now()-interval '10 minutes'`;
-    return this.db.$queryRaw<any[]>`SELECT id,instruction,mode,status,result,context,provider,error,proposal_id AS "proposalId",created_at AS "createdAt" FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid ORDER BY created_at,id LIMIT 200`;
+    await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET status='failed',error='Запрос прерван. Отправьте сообщение повторно.',updated_at=now() WHERE discussion_id=${id}::uuid AND status='running' AND updated_at<now()-interval '10 minutes'`;
+    return this.db.$queryRaw<any[]>`SELECT id,instruction,mode,status,result,context,provider,error,proposal_id AS "proposalId",created_at AS "createdAt" FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid ORDER BY created_at,id LIMIT 200`;
   }
   async send(user:string,project:string,id:string,raw:unknown,workflowId?:string){
     const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query','model']);
@@ -82,22 +82,22 @@ export class DiscussionService {
     const selected=r.sourceIds===undefined?null:(r.sourceIds as unknown[]).map(sourceId=>uuidInput({sourceId},'sourceId'));
     const thread=await this.thread(user,project,id),bodyDigest=digest(r),turnId=randomUUID();
     const prior=await this.db.$transaction(async tx=>{
-      await tx.$queryRaw`SELECT id FROM docgrid.dg_discussions WHERE id=${id}::uuid FOR UPDATE`;
-      const workflows=await tx.$queryRaw<any[]>`SELECT id FROM docgrid.dg_discussion_workflows WHERE discussion_id=${id}::uuid AND status IN ('planning','running','cancelling')`;
+      await tx.$queryRaw`SELECT id FROM docgrid_live.dg_discussions WHERE id=${id}::uuid FOR UPDATE`;
+      const workflows=await tx.$queryRaw<any[]>`SELECT id FROM docgrid_live.dg_discussion_workflows WHERE discussion_id=${id}::uuid AND status IN ('planning','running','cancelling')`;
       if(workflows.some(w=>w.id!==workflowId))throw new ConflictException('Дождитесь выполнения этапа');
-      const existing=await tx.$queryRaw<any[]>`SELECT * FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND request_key=${requestKey}`;
+      const existing=await tx.$queryRaw<any[]>`SELECT * FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid AND request_key=${requestKey}`;
       if(existing[0]){if(existing[0].body_digest!==bodyDigest)throw new ConflictException('Ключ запроса уже использован');return existing[0];}
-      const running=await tx.$queryRaw<any[]>`SELECT id FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='running'`;
+      const running=await tx.$queryRaw<any[]>`SELECT id FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='running'`;
       if(running.length)throw new ConflictException('Дождитесь ответа в этом обсуждении');
-      const count=await tx.$queryRaw<{n:number}[]>`SELECT count(*)::int AS n FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid`;
+      const count=await tx.$queryRaw<{n:number}[]>`SELECT count(*)::int AS n FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid`;
       if(count[0].n>=200)throw new BadRequestException('Создайте новое обсуждение');
       const config=await this.providerConfig();
       if(!config.available)throw new ServiceUnavailableException('Встроенная LLM временно недоступна. Проверьте подключение в настройках проекта.');
       if(!config.models.some((m:any)=>m.id===model))throw new BadRequestException('Выбранная модель недоступна');
       const limit=this.dailyLimit();
-      const budget=await tx.$queryRaw<any[]>`INSERT INTO docgrid.dg_ai_daily_usage(user_id,day,requests) VALUES(${user},(now() AT TIME ZONE 'UTC')::date,1) ON CONFLICT(user_id,day) DO UPDATE SET requests=docgrid.dg_ai_daily_usage.requests+1 WHERE docgrid.dg_ai_daily_usage.requests<${limit} RETURNING requests`;
+      const budget=await tx.$queryRaw<any[]>`INSERT INTO docgrid_live.dg_ai_daily_usage(user_id,day,requests) VALUES(${user},(now() AT TIME ZONE 'UTC')::date,1) ON CONFLICT(user_id,day) DO UPDATE SET requests=docgrid_live.dg_ai_daily_usage.requests+1 WHERE docgrid_live.dg_ai_daily_usage.requests<${limit} RETURNING requests`;
       if(!budget.length)throw new HttpException('Дневной лимит ИИ исчерпан. Он обновляется в 00:00 UTC.',429);
-      await tx.$executeRaw`INSERT INTO docgrid.dg_discussion_turns(id,discussion_id,request_key,body_digest,instruction,mode,status) VALUES(${turnId}::uuid,${id}::uuid,${requestKey},${bodyDigest},${instruction},${mode},'running')`;
+      await tx.$executeRaw`INSERT INTO docgrid_live.dg_discussion_turns(id,discussion_id,request_key,body_digest,instruction,mode,status) VALUES(${turnId}::uuid,${id}::uuid,${requestKey},${bodyDigest},${instruction},${mode},'running')`;
       return null;
     },{timeout:15000});
     if(prior)return {id:prior.id,status:prior.status};
@@ -144,8 +144,8 @@ export class DiscussionService {
       }
       const projectContext=await this.memory.context(project,candidates.map(s=>s.sourceId));
       const context={workflowId:workflowId||null,workflowStage:workflowId?(requestKey.endsWith(':plan')?'plan':'step'):null,environment,candidateIds:candidates.map(s=>s.sourceId).slice(0,501),projectContext,task,snapshotId,treeRevision,sourceRefs:refs,sources:coverage,total:candidates.length,offset,nextOffset:batch.length&&offset+batch.length<candidates.length?offset+batch.length:null,query:query||null,retrieval};
-      await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET context=${JSON.stringify(context)}::jsonb WHERE id=${turnId}::uuid`;
-      const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' AND (
+      await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET context=${JSON.stringify(context)}::jsonb WHERE id=${turnId}::uuid`;
+      const history=await this.db.$queryRaw<any[]>`SELECT instruction,result FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid AND status='completed' AND (
         (${workflowId||''}<>'' AND context->>'workflowId'=${workflowId||''}) OR
         (${workflowId||''}='' AND (
           ${selected===null&&folder==='/'} OR context->'environment'=${JSON.stringify(environment)}::jsonb OR
@@ -166,16 +166,16 @@ export class DiscussionService {
       // Fresh authorization after model latency; revoked grants cannot commit a new result.
       await call('docgrid_get_capabilities',{});
       const provider={model:typeof payload.model==='string'?payload.model.slice(0,200):null,requestId:payload.requestId,usage:payload.usage};
-      await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET status='completed',result=${JSON.stringify(result)}::jsonb,provider=${JSON.stringify(provider)}::jsonb,updated_at=now() WHERE id=${turnId}::uuid AND status='running'`;
-      if(task!=='chat'&&mode!=='advisor'&&(result.package||result.classifications.some(c=>c.confidence==='high'))){try{await this.propose(user,project,id,turnId);}catch(e){result.warnings.push('Предложение не создано: '+(e instanceof Error?e.message:'обновите контекст и повторите'));await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET result=${JSON.stringify(result)}::jsonb WHERE id=${turnId}::uuid`;}}
+      await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET status='completed',result=${JSON.stringify(result)}::jsonb,provider=${JSON.stringify(provider)}::jsonb,updated_at=now() WHERE id=${turnId}::uuid AND status='running'`;
+      if(task!=='chat'&&mode!=='advisor'&&(result.package||result.classifications.some(c=>c.confidence==='high'))){try{await this.propose(user,project,id,turnId);}catch(e){result.warnings.push('Предложение не создано: '+(e instanceof Error?e.message:'обновите контекст и повторите'));await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET result=${JSON.stringify(result)}::jsonb WHERE id=${turnId}::uuid`;}}
       return {id:turnId,status:'completed'};
     }catch(error){const message=error instanceof ServiceUnavailableException||error instanceof BadGatewayException||error instanceof BadRequestException?error.message:'Не удалось обработать запрос. Проверьте права LLM и доступность модели.';
-      await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET status='failed',error=${message},updated_at=now() WHERE id=${turnId}::uuid`;throw error;
+      await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET status='failed',error=${message},updated_at=now() WHERE id=${turnId}::uuid`;throw error;
     }finally{if(timeCall)await this.timeBudget.finish(timeCall);}
   }
   async propose(user:string,project:string,id:string,turnId:string){
     const thread=await this.thread(user,project,id);
-    const rows=await this.db.$queryRaw<any[]>`SELECT * FROM docgrid.dg_discussion_turns WHERE id=${turnId}::uuid AND discussion_id=${id}::uuid`;
+    const rows=await this.db.$queryRaw<any[]>`SELECT * FROM docgrid_live.dg_discussion_turns WHERE id=${turnId}::uuid AND discussion_id=${id}::uuid`;
     const turn=rows[0];if(!turn||turn.status!=='completed'||turn.mode==='advisor')throw new BadRequestException('Нет доступного предложения');
     if(turn.proposal_id)return this.agents.getOperation(user,project,turn.proposal_id);
     const result=turn.result as DiscussionResult,context=turn.context,pack=result.package;
@@ -191,13 +191,14 @@ export class DiscussionService {
     }else{
       const items=result.classifications.filter(c=>c.confidence==='high'&&c.evidence.length&&context.sources.some((s:any)=>s.sourceId===c.sourceId&&s.path!==c.destination));
       if(!items.length)throw new BadRequestException('Нет переносов с высокой уверенностью и подтверждёнными источниками');
-      const folders=await this.db.$queryRaw<{path:string}[]>`SELECT path FROM docgrid.docgrid_folders WHERE project_id=${project}::uuid`;
+      const folders=await this.db.$queryRaw<{path:string}[]>`SELECT path FROM docgrid_live.docgrid_folders WHERE project_id=${project}::uuid`;
       const paths=new Set(folders.map(f=>f.path)),changes:Record<string,unknown>[]=[];
       for(const item of items){const parts=item.destination.split('/').filter(Boolean);for(let i=1;i<=parts.length;i++){const path='/'+parts.slice(0,i).join('/');if(!paths.has(path)){paths.add(path);changes.push({action:'create_folder',path});}}changes.push({action:'move_source',sourceId:item.sourceId,path:item.destination});}
       tool='docgrid_propose_structure';input={baseTreeRevision:context.treeRevision,changes};
     }
     const operation=await this.agents.executeForUser(user,thread.grant_id,tool,{projectId:project,runId:turnId,traceId:turnId,requestKey:'discussion-proposal:'+turnId,input});
-    await this.db.$executeRaw`UPDATE docgrid.dg_discussion_turns SET proposal_id=${operation.id}::uuid WHERE id=${turnId}::uuid`;
+    await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET proposal_id=${operation.id}::uuid WHERE id=${turnId}::uuid`;
     return operation;
   }
 }
+
