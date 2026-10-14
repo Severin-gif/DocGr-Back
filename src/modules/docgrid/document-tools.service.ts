@@ -50,7 +50,7 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
   async onModuleDestroy(){this.stopped=true;if(this.timer)clearInterval(this.timer);if(this.cleanupTimer)clearInterval(this.cleanupTimer);await Promise.all([this.active,this.cleanupActive]);}
   private enabled(){if(process.env.DOCGRID_TOOLS_ENABLED==='false')throw new ServiceUnavailableException('Инструменты временно отключены');}
   private async access(db:PrismaService|any,user:string,project:string,write=false){
-    const rows=await db.$queryRaw`SELECT p.id FROM docgrid.workspace_projects p WHERE p.id=${project}::uuid AND (p.owner_id=${user} OR EXISTS (SELECT 1 FROM docgrid.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${user} AND (${!write} OR m.role IN ('EDITOR','REVIEWER'))))`;
+    const rows=await db.$queryRaw`SELECT p.id FROM docgrid_live.workspace_projects p WHERE p.id=${project}::uuid AND (p.owner_id=${user} OR EXISTS (SELECT 1 FROM docgrid_live.docgrid_members m WHERE m.project_id=p.id AND m.user_id=${user} AND (${!write} OR m.role IN ('EDITOR','REVIEWER'))))`;
     if(!rows.length)throw new NotFoundException('Проект недоступен или недостаточно прав');
   }
   private key(){const key=process.env.DOCGRID_TOOLS_SECRET||process.env.DOCGRID_SERVICE_TOKEN;if(!key)throw new ServiceUnavailableException('Не настроен ключ защищённой обработки');return createHash('sha256').update(key).digest();}
@@ -63,7 +63,7 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
     return {title:m.title,mime:m.mime,bytes:Buffer.from(m.bytes)};
   }
   private view(row:Job){return {id:row.id,tool:row.tool,title:row.title,state:row.state,result:row.result,warnings:row.warnings,error:row.error};}
-  async list(user:string,project:string){await this.access(this.db,user,project);const rows=await this.db.$queryRaw<Job[]>`SELECT id,tool,title,state,result,warnings,error FROM docgrid.dg_tool_jobs WHERE project_id=${project}::uuid ORDER BY created_at DESC LIMIT 50`;return rows.map(r=>this.view(r));}
+  async list(user:string,project:string){await this.access(this.db,user,project);const rows=await this.db.$queryRaw<Job[]>`SELECT id,tool,title,state,result,warnings,error FROM docgrid_live.dg_tool_jobs WHERE project_id=${project}::uuid ORDER BY created_at DESC LIMIT 50`;return rows.map(r=>this.view(r));}
   async enqueue(user:string,project:string,raw:unknown){
     this.enabled();const parsed=toolInputSchema.safeParse(raw);if(!parsed.success)throw new BadRequestException(parsed.error.issues.map(i=>i.message).join('; '));
     const cfg:ToolInput & {secret?:string}=parsed.data;
@@ -81,11 +81,11 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
       await this.access(tx,user,project,true);
       // Serialize queue admission and bound outstanding jobs across replicas.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(29140002)`;
-      const [existing]=await tx.$queryRaw<Job[]>`SELECT * FROM docgrid.dg_tool_jobs WHERE id=${cfg.requestId}::uuid`;
+      const [existing]=await tx.$queryRaw<Job[]>`SELECT * FROM docgrid_live.dg_tool_jobs WHERE id=${cfg.requestId}::uuid`;
       if(existing){if(existing.project_id!==project||existing.actor_id!==user)throw new ConflictException('Повторите операцию с новым идентификатором');return this.view(existing);}
-      const [pending]=await tx.$queryRaw<{count:number}[]>`SELECT count(*)::int AS count FROM docgrid.dg_tool_jobs WHERE actor_id=${user} AND state IN ('queued','running')`;
+      const [pending]=await tx.$queryRaw<{count:number}[]>`SELECT count(*)::int AS count FROM docgrid_live.dg_tool_jobs WHERE actor_id=${user} AND state IN ('queued','running')`;
       if(pending.count>=5)throw new BadRequestException('Дождитесь завершения предыдущих операций (не более пяти в очереди)');
-      const [row]=await tx.$queryRaw<Job[]>`INSERT INTO docgrid.dg_tool_jobs(id,project_id,actor_id,tool,title,config) VALUES(${cfg.requestId}::uuid,${project}::uuid,${user},${cfg.tool},${cfg.title},${JSON.stringify(cfg)}::jsonb) RETURNING *`;
+      const [row]=await tx.$queryRaw<Job[]>`INSERT INTO docgrid_live.dg_tool_jobs(id,project_id,actor_id,tool,title,config) VALUES(${cfg.requestId}::uuid,${project}::uuid,${user},${cfg.tool},${cfg.title},${JSON.stringify(cfg)}::jsonb) RETURNING *`;
       return this.view(row);
     });
   }
@@ -165,15 +165,15 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
     const job=await this.db.$transaction(async tx=>{
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(29140002)`;
       // A crashed job is failed, never silently rerun after possibly storing a result.
-      await tx.$executeRaw`UPDATE docgrid.dg_tool_jobs SET state='failed',error='Обработка прервана перезапуском сервиса. Проверьте папку результатов перед повтором.',config=config-'secret',updated_at=now() WHERE state='running' AND lease_until<now()`;
-      const busy=await tx.$queryRaw<any[]>`SELECT id FROM docgrid.dg_tool_jobs WHERE state='running' LIMIT 1`;if(busy.length)return null;
-      const [row]=await tx.$queryRaw<Job[]>`SELECT * FROM docgrid.dg_tool_jobs WHERE state='queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`;
+      await tx.$executeRaw`UPDATE docgrid_live.dg_tool_jobs SET state='failed',error='Обработка прервана перезапуском сервиса. Проверьте папку результатов перед повтором.',config=config-'secret',updated_at=now() WHERE state='running' AND lease_until<now()`;
+      const busy=await tx.$queryRaw<any[]>`SELECT id FROM docgrid_live.dg_tool_jobs WHERE state='running' LIMIT 1`;if(busy.length)return null;
+      const [row]=await tx.$queryRaw<Job[]>`SELECT * FROM docgrid_live.dg_tool_jobs WHERE state='queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`;
       if(!row)return null;
-      await tx.$executeRaw`UPDATE docgrid.dg_tool_jobs SET state='running',lease_until=now()+interval '10 minutes',updated_at=now() WHERE id=${row.id}::uuid`;return row;
+      await tx.$executeRaw`UPDATE docgrid_live.dg_tool_jobs SET state='running',lease_until=now()+interval '10 minutes',updated_at=now() WHERE id=${row.id}::uuid`;return row;
     });
     if(!job)return;
     let dir='';
-    const heartbeat=setInterval(()=>{void this.db.$executeRaw`UPDATE docgrid.dg_tool_jobs SET lease_until=now()+interval '10 minutes' WHERE id=${job.id}::uuid AND state='running'`.catch(()=>this.logger.warn('Document tools lease renewal failed'));},30000);
+    const heartbeat=setInterval(()=>{void this.db.$executeRaw`UPDATE docgrid_live.dg_tool_jobs SET lease_until=now()+interval '10 minutes' WHERE id=${job.id}::uuid AND state='running'`.catch(()=>this.logger.warn('Document tools lease renewal failed'));},30000);
     heartbeat.unref();
     try{
       await this.access(this.db,job.actor_id,job.project_id,true);dir=await mkdtemp(join(tmpdir(),'dg-tools-'));
@@ -195,13 +195,14 @@ export class DocumentToolsService implements OnModuleInit,OnModuleDestroy {
       if(!saved.length)throw new BadRequestException('Результат не создан');
       await this.db.$transaction(async tx=>{
         await this.access(tx,job.actor_id,job.project_id,true);
-        await tx.$executeRaw`UPDATE docgrid.dg_tool_jobs SET state='completed',result=${JSON.stringify(saved)}::jsonb,warnings=${JSON.stringify(result.warnings||[])}::jsonb,config=config-'secret',updated_at=now() WHERE id=${job.id}::uuid`;
+        await tx.$executeRaw`UPDATE docgrid_live.dg_tool_jobs SET state='completed',result=${JSON.stringify(saved)}::jsonb,warnings=${JSON.stringify(result.warnings||[])}::jsonb,config=config-'secret',updated_at=now() WHERE id=${job.id}::uuid`;
         const metadata={tool:job.tool,title:job.title,sources:job.config.sources,outputs:saved,inputBytes:result.inputBytes,outputBytes:result.outputBytes};
-        await tx.$executeRaw`INSERT INTO docgrid.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata) VALUES(${job.project_id}::uuid,${job.actor_id},'tools.completed','tool',${job.id}::uuid,${JSON.stringify(metadata)}::jsonb)`;
+        await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata) VALUES(${job.project_id}::uuid,${job.actor_id},'tools.completed','tool',${job.id}::uuid,${JSON.stringify(metadata)}::jsonb)`;
       });
     }catch(error){
       const message=error instanceof BadRequestException||error instanceof NotFoundException||error instanceof ConflictException||error instanceof ServiceUnavailableException?error.message:'Не удалось завершить обработку. Проверьте файлы и повторите.';
-      await this.db.$executeRaw`UPDATE docgrid.dg_tool_jobs SET state='failed',error=${message},config=config-'secret',updated_at=now() WHERE id=${job.id}::uuid`;
+      await this.db.$executeRaw`UPDATE docgrid_live.dg_tool_jobs SET state='failed',error=${message},config=config-'secret',updated_at=now() WHERE id=${job.id}::uuid`;
     }finally{clearInterval(heartbeat);if(dir)await rm(dir,{recursive:true,force:true});}
   }
 }
+

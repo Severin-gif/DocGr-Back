@@ -17,8 +17,8 @@ module.exports = async ({call, jwt, db, databaseUrl}) => {
   assert.ok(!(await call('/api/docgrid/repositories','GET',undefined,jwt('stranger'))).some(p => p.slug === first.slug));
   await call(prefix + '/overview','GET',undefined,jwt('stranger'),404);
   // A pre-slug application writes the same table without the new column.
-  const [legacy] = await db.$queryRaw`INSERT INTO docgrid.workspace_projects(owner_id,name)
-    SELECT owner_id,'Тимаева' FROM docgrid.workspace_projects WHERE id=${first.id}::uuid RETURNING id,slug`;
+  const [legacy] = await db.$queryRaw`INSERT INTO docgrid_live.workspace_projects(owner_id,name)
+    SELECT owner_id,'Тимаева' FROM docgrid_live.workspace_projects WHERE id=${first.id}::uuid RETURNING id,slug`;
   assert.ok(legacy.slug);
   assert.notEqual(legacy.slug, first.slug);
   assert.notEqual(legacy.slug, second.slug);
@@ -35,7 +35,7 @@ module.exports = async ({call, jwt, db, databaseUrl}) => {
     try {
       const createNew = () => call('/api/docgrid/repositories', 'POST', {name:'Mixed rollout'}, jwt('owner'), 201);
       const createOld = async () => (await old.query(
-        "INSERT INTO docgrid.workspace_projects(owner_id,name) SELECT owner_id,'Mixed rollout' FROM docgrid.workspace_projects WHERE id=$1 RETURNING id,slug", [first.id],
+        "INSERT INTO docgrid_live.workspace_projects(owner_id,name) SELECT owner_id,'Mixed rollout' FROM docgrid_live.workspace_projects WHERE id=$1 RETURNING id,slug", [first.id],
       )).rows[0];
       const mixed = await Promise.all([createNew(), createOld(), createNew(), createOld()]);
       assert.equal(new Set(mixed.map(p => p.slug)).size, mixed.length);
@@ -48,3 +48,4 @@ module.exports = async ({call, jwt, db, databaseUrl}) => {
   console.log('PASS legacy-container insert gains slug visible in authorized inventory, overview and Home');
   console.log('PASS persistent project slugs, concurrent equal names, UUID access, rename stability and authorization');
 };
+

@@ -25,27 +25,27 @@ const { DocGridService } = require(
   const pg = new PGlite();
   await pg.waitReady;
   await pg.exec(
-    `CREATE SCHEMA docgrid; SET search_path=docgrid; CREATE TABLE docgrid."User"(id TEXT PRIMARY KEY,email TEXT); CREATE TABLE docgrid.workspace_projects(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),owner_id TEXT REFERENCES docgrid."User"(id),name TEXT,description TEXT,created_at TIMESTAMPTZ DEFAULT now(),updated_at TIMESTAMPTZ DEFAULT now()); CREATE TABLE docgrid.workspace_documents(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),project_id UUID REFERENCES docgrid.workspace_projects(id),title TEXT,path TEXT,content TEXT,version INT DEFAULT 1,updated_at TIMESTAMPTZ DEFAULT now()); CREATE TABLE docgrid.workspace_document_versions(document_id UUID REFERENCES docgrid.workspace_documents(id),version INT,content TEXT,author_id TEXT,message TEXT,PRIMARY KEY(document_id,version)); INSERT INTO docgrid."User" VALUES('owner','owner@test'),('editor','editor@test'),('reader','reader@test'),('reviewer','reviewer@test'),('stranger','stranger@test');`,
+    `CREATE SCHEMA docgrid_live; SET search_path=docgrid_live; CREATE TABLE docgrid_live."User"(id TEXT PRIMARY KEY,email TEXT); CREATE TABLE docgrid_live.workspace_projects(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),owner_id TEXT REFERENCES docgrid_live."User"(id),name TEXT,description TEXT,created_at TIMESTAMPTZ DEFAULT now(),updated_at TIMESTAMPTZ DEFAULT now()); CREATE TABLE docgrid_live.workspace_documents(id UUID PRIMARY KEY DEFAULT gen_random_uuid(),project_id UUID REFERENCES docgrid_live.workspace_projects(id),title TEXT,path TEXT,content TEXT,version INT DEFAULT 1,updated_at TIMESTAMPTZ DEFAULT now()); CREATE TABLE docgrid_live.workspace_document_versions(document_id UUID REFERENCES docgrid_live.workspace_documents(id),version INT,content TEXT,author_id TEXT,message TEXT,PRIMARY KEY(document_id,version)); INSERT INTO docgrid_live."User" VALUES('owner','owner@test'),('editor','editor@test'),('reader','reader@test'),('reviewer','reviewer@test'),('stranger','stranger@test');`,
   );
   await pg.exec(
     fs.readFileSync(
-      "prisma/migrations/20260918213000_add_docgrid_gitlaw/migration.sql",
+      "prisma/live/migrations/20260918213000_add_docgrid_gitlaw/migration.sql",
       "utf8",
     ),
   );
   await pg.exec(
     fs.readFileSync(
-      "prisma/migrations/20260921170000_docgrid_core/migration.sql",
+      "prisma/live/migrations/20260921170000_docgrid_core/migration.sql",
       "utf8",
     ),
   );
-  await pg.exec(fs.readFileSync("prisma/migrations/20260924220000_docgrid_material_storage/migration.sql", "utf8"));
-  for (const name of ['20260921100000_add_document_workflow','20260924110000_astra_workflow','20260924111000_astra_sources']) await pg.exec(fs.readFileSync(`prisma/migrations/${name}/migration.sql`,'utf8'));
-  await pg.exec("ALTER TABLE docgrid.docgrid_materials ADD COLUMN extraction_reason text");
-  await pg.exec(fs.readFileSync("prisma/migrations/20261008100000_shared_folders/migration.sql", "utf8"));
-  await pg.exec(fs.readFileSync("prisma/migrations/20261008174500_document_docx_structure/migration.sql", "utf8"));
+  await pg.exec(fs.readFileSync("prisma/live/migrations/20260924220000_docgrid_material_storage/migration.sql", "utf8"));
+  for (const name of ['20260921100000_add_document_workflow','20260924110000_astra_workflow','20260924111000_astra_sources']) await pg.exec(fs.readFileSync(`prisma/live/migrations/${name}/migration.sql`,'utf8'));
+  await pg.exec("ALTER TABLE docgrid_live.docgrid_materials ADD COLUMN extraction_reason text");
+  await pg.exec(fs.readFileSync("prisma/live/migrations/20261008100000_shared_folders/migration.sql", "utf8"));
+  await pg.exec(fs.readFileSync("prisma/live/migrations/20261008174500_document_docx_structure/migration.sql", "utf8"));
   for (const migration of ['20261011210000_project_slugs', '20261012070000_project_slug_rollout']) {
-    await pg.exec(fs.readFileSync(`prisma/migrations/${migration}/migration.sql`, 'utf8'));
+    await pg.exec(fs.readFileSync(`prisma/live/migrations/${migration}/migration.sql`, 'utf8'));
   }
   function adapter(client) {
     const query = async (strings, ...values) =>
@@ -60,11 +60,11 @@ const { DocGridService } = require(
     db.$transaction = (fn) => client.transaction((tx) => fn(adapter(tx)));
     db.workspaceProject = {
       findUnique: async ({ where }) =>
-        (await client.query('SELECT id FROM docgrid.workspace_projects WHERE slug=$1', [where.slug])).rows[0] ?? null,
+        (await client.query('SELECT id FROM docgrid_live.workspace_projects WHERE slug=$1', [where.slug])).rows[0] ?? null,
       create: async ({ data: d }) =>
         (
           await client.query(
-            'INSERT INTO docgrid.workspace_projects(owner_id,name,description,slug) VALUES($1,$2,$3,$4) RETURNING id,slug,name,description,created_at AS "createdAt",updated_at AS "updatedAt"',
+            'INSERT INTO docgrid_live.workspace_projects(owner_id,name,description,slug) VALUES($1,$2,$3,$4) RETURNING id,slug,name,description,created_at AS "createdAt",updated_at AS "updatedAt"',
             [d.ownerId, d.name, d.description, d.slug],
           )
         ).rows[0],
@@ -73,13 +73,13 @@ const { DocGridService } = require(
       create: async ({ data: d }) => {
         const r = (
           await client.query(
-            'INSERT INTO docgrid.workspace_documents(project_id,title,path,content) VALUES($1,$2,$3,$4) RETURNING id,project_id AS "projectId",title,path,content,version,updated_at AS "updatedAt"',
+            'INSERT INTO docgrid_live.workspace_documents(project_id,title,path,content) VALUES($1,$2,$3,$4) RETURNING id,project_id AS "projectId",title,path,content,version,updated_at AS "updatedAt"',
             [d.projectId, d.title, d.path, d.content],
           )
         ).rows[0];
         const v = d.versions.create;
         await client.query(
-          "INSERT INTO docgrid.workspace_document_versions VALUES($1,$2,$3,$4,$5)",
+          "INSERT INTO docgrid_live.workspace_document_versions VALUES($1,$2,$3,$4,$5)",
           [r.id, v.version, v.content, v.authorId, v.message],
         );
         return r;
@@ -95,7 +95,7 @@ const { DocGridService } = require(
   assert.notEqual(sameName.id, project.id);
   const cyrillic = await service.createRepository('owner', { name: '  Тимаева  ' });
   assert.equal(cyrillic.slug, 'timaeva');
-  assert.equal((await pg.query('SELECT slug FROM docgrid.workspace_projects WHERE id=$1', [cyrillic.id])).rows[0].slug, cyrillic.slug);
+  assert.equal((await pg.query('SELECT slug FROM docgrid_live.workspace_projects WHERE id=$1', [cyrillic.id])).rows[0].slug, cyrillic.slug);
   console.log('PASS repository creation persists slug, equal names remain unique, Cyrillic names normalize');
   const doc = await service.createArtifact("owner", project.id, {
     title: "Agreement",
@@ -274,7 +274,7 @@ const { DocGridService } = require(
   const pg2 = new PGlite({ loadDataDir: snapshot });
   await pg2.waitReady;
   assert.equal(
-    (await pg2.query("SELECT count(*)::int n FROM docgrid.docgrid_materials")).rows[0]
+    (await pg2.query("SELECT count(*)::int n FROM docgrid_live.docgrid_materials")).rows[0]
       .n,
     1,
   );
@@ -310,20 +310,20 @@ const { DocGridService } = require(
   };
   const s3Service = new DocGridService(adapter(pg),storage);
   const s3file = await s3Service.uploadMaterial('owner',project.id,{originalname:'private.txt',mimetype:'text/plain',buffer:Buffer.from('Private original')},'/S3');
-  const external = (await pg.query('SELECT * FROM docgrid.docgrid_materials WHERE id=$1',[s3file.id])).rows[0];
+  const external = (await pg.query('SELECT * FROM docgrid_live.docgrid_materials WHERE id=$1',[s3file.id])).rows[0];
   assert.equal(external.bytes,null);assert.ok(external.storage_key);assert.equal(external.byte_size,16);
   assert.equal((await s3Service.material('reader',project.id,s3file.id)).bytes.toString(),'Private original');
   const beforeMigration = (await service.files('owner',project.id)).materials.find(item=>item.id===bigFile.id);
   const migrationKey = await storage.store(project.id,large,bigFile.sha256);
-  await pg.query('UPDATE docgrid.docgrid_materials SET storage_key=$1 WHERE id=$2',[migrationKey,bigFile.id]);
+  await pg.query('UPDATE docgrid_live.docgrid_materials SET storage_key=$1 WHERE id=$2',[migrationKey,bigFile.id]);
   // Verify the real backing object, even while a database mirror is retained.
   assert.equal((await s3Service.material('owner',project.id,bigFile.id)).bytes.length,large.length);
-  await pg.query('UPDATE docgrid.docgrid_materials SET bytes=NULL WHERE id=$1',[bigFile.id]);
+  await pg.query('UPDATE docgrid_live.docgrid_materials SET bytes=NULL WHERE id=$1',[bigFile.id]);
   const afterMigration = (await s3Service.files('owner',project.id)).materials.find(item=>item.id===bigFile.id);
   assert.deepEqual(afterMigration,beforeMigration);
   assert.equal(createHash('sha256').update((await s3Service.material('owner',project.id,bigFile.id)).bytes).digest('hex'),bigFile.sha256);
-  await assert.rejects(()=>pg.query('UPDATE docgrid.docgrid_materials SET storage_key=$1 WHERE id=$2',['docgrid/materials/other',bigFile.id]),/immutable/);
-  await assert.rejects(()=>pg.query('UPDATE docgrid.docgrid_materials SET byte_size=1 WHERE id=$1',[bigFile.id]),/immutable/);
+  await assert.rejects(()=>pg.query('UPDATE docgrid_live.docgrid_materials SET storage_key=$1 WHERE id=$2',['docgrid/materials/other',bigFile.id]),/immutable/);
+  await assert.rejects(()=>pg.query('UPDATE docgrid_live.docgrid_materials SET byte_size=1 WHERE id=$1',[bigFile.id]),/immutable/);
   objects.set(migrationKey,Buffer.from('tampered'));
   await assert.rejects(()=>s3Service.material('owner',project.id,bigFile.id),e=>e.getResponse().code==='SOURCE_INTEGRITY_FAILED');
   const failingStorage = new DocGridService(adapter(pg),{...storage,store:async()=>{throw Error('storage unavailable');}});
@@ -337,7 +337,7 @@ const { DocGridService } = require(
   const badUpload = await s3Service.uploadMaterial('owner',project.id,{originalname:'broken.pdf',mimetype:'application/pdf',buffer:badPdf},'/S3');
   assert.equal(badUpload.extractionStatus,'UNREAD');
   assert.deepEqual((await s3Service.material('reader',project.id,badUpload.id)).bytes,badPdf);
-  const badStored = (await pg.query('SELECT bytes,storage_key,extracted_text FROM docgrid.docgrid_materials WHERE id=$1',[badUpload.id])).rows[0];
+  const badStored = (await pg.query('SELECT bytes,storage_key,extracted_text FROM docgrid_live.docgrid_materials WHERE id=$1',[badUpload.id])).rows[0];
   assert.equal(badStored.bytes,null);assert.ok(badStored.storage_key);assert.equal(badStored.extracted_text,'');
   console.log('PASS PDF parser failure still stores exact immutable original with UNREAD status');
   await pg.close();
@@ -345,3 +345,4 @@ const { DocGridService } = require(
   console.error(e);
   process.exitCode = 1;
 });
+

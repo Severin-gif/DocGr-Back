@@ -15,12 +15,12 @@ module.exports=async({call,jwt,base,db})=>{
  const text=await upload('proof.txt','A😀Б доказательство\n'+ 'текст '.repeat(10000)),html=await upload('decision.html',htmlInput);
  const scan=await upload('scan.pdf','%PDF- invalid'),hidden=await upload('private.txt','PRIVATE','/Case2');
  const doc=await call(root+'/artifacts','POST',{title:'Договор',path:'/Case',content:'<!-- docgrid-richtext-v1 --><p>Первый абзац</p><table><tr><td>Сумма</td><td>100</td></tr></table>'},owner,201);
- const [identity]=await db.$queryRaw`SELECT owner_id FROM docgrid.workspace_projects WHERE id=${p.id}::uuid`;const ownerId=identity.owner_id;
+ const [identity]=await db.$queryRaw`SELECT owner_id FROM docgrid_live.workspace_projects WHERE id=${p.id}::uuid`;const ownerId=identity.owner_id;
  const prepared=await db.preparedLegalDocument.create({data:{ownerId,title:'Подготовленный иск',currentVersion:1,nextVersion:2}});
  const task=await db.documentTask.create({data:{ownerId,operation:'CREATE',request:'Fixture'}});
  await db.documentVersion.create({data:{documentId:prepared.id,version:1,status:'CONTENT_READY',title:prepared.title,structuredContent:{blocks:[]},plainText:'Подготовленный иск: взыскать 100 рублей',createdBy:ownerId}});
- await db.$executeRaw`INSERT INTO docgrid.dg_astra_document_tasks(task_id,project_id,grant_id,operation_id,plan_digest,scope_digest,plan_revision,source_snapshot_id,source_refs,state) VALUES(${task.id}::uuid,${p.id}::uuid,${randomUUID()}::uuid,${randomUUID()}::uuid,${'a'.repeat(64)},${'b'.repeat(64)},1,${randomUUID()}::uuid,'[]'::jsonb,'SUBMITTED')`;
- await db.$executeRaw`INSERT INTO docgrid.dg_astra_documents(document_id,project_id,task_id,path) VALUES(${prepared.id}::uuid,${p.id}::uuid,${task.id}::uuid,'/Case')`;
+ await db.$executeRaw`INSERT INTO docgrid_live.dg_astra_document_tasks(task_id,project_id,grant_id,operation_id,plan_digest,scope_digest,plan_revision,source_snapshot_id,source_refs,state) VALUES(${task.id}::uuid,${p.id}::uuid,${randomUUID()}::uuid,${randomUUID()}::uuid,${'a'.repeat(64)},${'b'.repeat(64)},1,${randomUUID()}::uuid,'[]'::jsonb,'SUBMITTED')`;
+ await db.$executeRaw`INSERT INTO docgrid_live.dg_astra_documents(document_id,project_id,task_id,path) VALUES(${prepared.id}::uuid,${p.id}::uuid,${task.id}::uuid,'/Case')`;
  const expiresAt=new Date(Date.now()+3600000).toISOString();
  const share=await call(root+'/shares','POST',{path:'/Case',mode:'READ',expiresAt},owner,201),pub='/api/docgrid/shared/'+share.token;
  const manifest=await call(pub+'/manifest','GET',undefined,null);assert.equal(manifest.total,5);assert.equal(manifest.indexed,5);assert.equal(manifest.complete,false);assert.equal(manifest.unread,1);assert.ok(!manifest.sources.some(s=>s.id===hidden.id));assert.ok(!JSON.stringify(manifest).includes('hidden secret'));
@@ -54,7 +54,7 @@ module.exports=async({call,jwt,base,db})=>{
  await call(pub+`/files/material/${text.id}/text`,'GET',undefined,null,400);
  await call(endpoint(source,99999999),'GET',undefined,null,400);
  await call(endpoint(source,0,50001),'GET',undefined,null,400);
- await db.$executeRaw`UPDATE docgrid.docgrid_materials SET extracted_text='New OCR text' WHERE id=${text.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.docgrid_materials SET extracted_text='New OCR text' WHERE id=${text.id}::uuid`;
  await call(endpoint(source),'GET',undefined,null,409);
  await call(pub+`/manifest?offset=2&indexVersion=${page.indexVersion}`,'GET',undefined,null,409);
  const updated=await call(pub+'/manifest','GET',undefined,null);assert.notEqual(updated.sources.find(s=>s.id===text.id).version,source.version);
@@ -64,8 +64,8 @@ module.exports=async({call,jwt,base,db})=>{
  const grantInput={agentRef:'external-llm',actions:['docgrid_get_capabilities'],expiresAt,maxOperations:10};
  const external=await call(root+'/agents/grants','POST',{...grantInput,requestKey:'external-corpus'},owner,201);
  const builtin=await call(root+'/agents/grants','POST',{...grantInput,requestKey:'corpus-builtin-fixture'},owner,201);
- await db.$executeRaw`UPDATE docgrid.dg_astra_grants SET builtin=true WHERE id=${builtin.grant.id}::uuid`;
- const operation=randomUUID();await db.$executeRaw`INSERT INTO docgrid.dg_astra_operations(id,project_id,grant_id,tool,run_id,request_key,trace_id,body_digest,input,status) VALUES(${operation}::uuid,${p.id}::uuid,${external.grant.id}::uuid,'docgrid_get_capabilities','fixture','pending','fixture',${'a'.repeat(64)},'{}'::jsonb,'needs_user_action')`;
+ await db.$executeRaw`UPDATE docgrid_live.dg_astra_grants SET builtin=true WHERE id=${builtin.grant.id}::uuid`;
+ const operation=randomUUID();await db.$executeRaw`INSERT INTO docgrid_live.dg_astra_operations(id,project_id,grant_id,tool,run_id,request_key,trace_id,body_digest,input,status) VALUES(${operation}::uuid,${p.id}::uuid,${external.grant.id}::uuid,'docgrid_get_capabilities','fixture','pending','fixture',${'a'.repeat(64)},'{}'::jsonb,'needs_user_action')`;
  const other=await call('/api/docgrid/repositories','POST',{name:'Independent project'},owner,201),otherRoot='/api/docgrid/repositories/'+other.id;
  const otherShare=await call(otherRoot+'/shares','POST',{path:'/',mode:'READ',expiresAt},owner,201);
  assert.deepEqual(await call(root+'/access-summary'),{links:1,agents:1,members:1});
@@ -81,10 +81,11 @@ module.exports=async({call,jwt,base,db})=>{
  await call(root+'/files','GET',undefined,guest,404);assert.deepEqual(await call(root+'/members'),[]);await call(root+'/files','GET',undefined,owner);
  const repeated=await call(root+'/access/revoke-all','POST',{scope:'all'},owner,201);assert.equal(repeated.links,0);assert.equal(repeated.agents,0);assert.equal(repeated.members,0);
  const fresh=await call(root+'/shares','POST',{path:'/Case',mode:'READ',expiresAt},owner,201),freshPub='/api/docgrid/shared/'+fresh.token;
- await db.$executeRaw`UPDATE docgrid.docgrid_materials SET deleted_at=now() WHERE id=${html.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.docgrid_materials SET deleted_at=now() WHERE id=${html.id}::uuid`;
  await call(freshPub+`/files/material/${html.id}/text?version=${htmlSource.version}`,'GET',undefined,null,404);
  assert.equal((await call(freshPub+'/manifest','GET',undefined,null)).total,4);
- await db.$executeRaw`UPDATE docgrid.dg_folder_shares SET expires_at=now()-interval '1 second' WHERE id=${fresh.id}::uuid`;
+ await db.$executeRaw`UPDATE docgrid_live.dg_folder_shares SET expires_at=now()-interval '1 second' WHERE id=${fresh.id}::uuid`;
  await call(freshPub+'/manifest','GET',undefined,null,404);
  console.log('PASS external corpus HTTP: anonymous text, HTML sanitation, UTF-16 pagination, incomplete coverage, text-version conflicts, folder isolation, deleted/expired/revoked links, bulk grants/operations, optional membership reset, owner/builtin/other-project preservation');
 };
+

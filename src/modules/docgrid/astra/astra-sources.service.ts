@@ -42,7 +42,7 @@ export class AstraSourcesService {
 
   private async project(tx: AstraDb, ctx: AstraContext, input: Record<string, unknown>) {
     strictKeys(input, []);
-    const rows = await tx.$queryRaw<any[]>`SELECT id,name,description FROM docgrid.workspace_projects WHERE id=${ctx.projectId}::uuid`;
+    const rows = await tx.$queryRaw<any[]>`SELECT id,name,description FROM docgrid_live.workspace_projects WHERE id=${ctx.projectId}::uuid`;
     if (!rows[0]) throw new NotFoundException({ code: 'PROJECT_NOT_FOUND' });
     return { output: { ...rows[0], executionTrack: 'DOCGRID_AGENT', sourceScope: ctx.allowedSourceIds, href: `/projects/${ctx.projectId}` } };
   }
@@ -52,23 +52,23 @@ export class AstraSourcesService {
     const entries = await tx.$queryRaw<Entry[]>`
       SELECT id,'material' AS kind,title,path,sha256::text AS version,sha256::text AS hash,
         byte_size::int AS size,octet_length(extracted_text)::int AS "textSize",extraction_status AS status,encode(sha256(convert_to(extracted_text || extracted_pages::text,'UTF8')),'hex') AS "extractionFingerprint"
-      FROM docgrid.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND deleted_at IS NULL
+      FROM docgrid_live.docgrid_materials WHERE project_id=${ctx.projectId}::uuid AND deleted_at IS NULL
         AND (${ids}::jsonb IS NULL OR id::text IN (SELECT jsonb_array_elements_text(${ids}::jsonb)))
       UNION ALL
       SELECT id,'document',title,path,version::text,encode(sha256(convert_to(content,'UTF8')),'hex'),octet_length(content)::int,octet_length(content)::int,'READY',encode(sha256(convert_to(content,'UTF8')),'hex')
-      FROM docgrid.workspace_documents WHERE project_id=${ctx.projectId}::uuid AND docgrid_deleted_at IS NULL
+      FROM docgrid_live.workspace_documents WHERE project_id=${ctx.projectId}::uuid AND docgrid_deleted_at IS NULL
         AND (${ids}::jsonb IS NULL OR id::text IN (SELECT jsonb_array_elements_text(${ids}::jsonb)))
       UNION ALL
       SELECT d.id,'artifact',d.title,b.path,d.current_version::text,encode(sha256(convert_to(v.plain_text,'UTF8')),'hex'),octet_length(v.plain_text)::int,octet_length(v.plain_text)::int,'READY',encode(sha256(convert_to(v.plain_text,'UTF8')),'hex')
-      FROM docgrid.dg_astra_documents b JOIN docgrid.prepared_legal_documents d ON d.id=b.document_id
-      JOIN docgrid.document_versions v ON v.document_id=d.id AND v.version=d.current_version
+      FROM docgrid_live.dg_astra_documents b JOIN docgrid_live.prepared_legal_documents d ON d.id=b.document_id
+      JOIN docgrid_live.document_versions v ON v.document_id=d.id AND v.version=d.current_version
       WHERE b.project_id=${ctx.projectId}::uuid AND (${ids}::jsonb IS NULL OR d.id::text IN (SELECT jsonb_array_elements_text(${ids}::jsonb)))
       UNION ALL
-      SELECT id,'folder','',path,'',NULL,0,0,NULL,NULL FROM docgrid.docgrid_folders
+      SELECT id,'folder','',path,'',NULL,0,0,NULL,NULL FROM docgrid_live.docgrid_folders
       WHERE project_id=${ctx.projectId}::uuid AND ${ids}::jsonb IS NULL ORDER BY kind,id LIMIT 5001`;
     if (entries.length > 5000) throw new BadRequestException({ code: 'SCOPE_TOO_LARGE', limit: 5000 });
     const relations = await tx.$queryRaw<any[]>`SELECT id,from_ref AS "fromRef",to_ref AS "toRef",relation_type AS type,status
-      FROM docgrid.dg_astra_relations WHERE project_id=${ctx.projectId}::uuid AND
+      FROM docgrid_live.dg_astra_relations WHERE project_id=${ctx.projectId}::uuid AND
       (${ids}::jsonb IS NULL OR (from_ref->>'sourceId' IN (SELECT jsonb_array_elements_text(${ids}::jsonb))
       AND to_ref->>'sourceId' IN (SELECT jsonb_array_elements_text(${ids}::jsonb)))) ORDER BY id LIMIT 5001`;
     if (relations.length > 5000) throw new BadRequestException({ code: 'SCOPE_TOO_LARGE', limit: 5000 });
@@ -81,7 +81,7 @@ export class AstraSourcesService {
 
   private async loadSnapshot(tx: AstraDb, ctx: AstraContext, id: string): Promise<Snapshot> {
     const rows = await tx.$queryRaw<Snapshot[]>`SELECT id,project_id AS "projectId",grant_id AS "grantId",tree_revision AS "treeRevision",
-      manifest,cursor_secret AS "cursorSecret",created_at AS "createdAt" FROM docgrid.dg_astra_snapshots
+      manifest,cursor_secret AS "cursorSecret",created_at AS "createdAt" FROM docgrid_live.dg_astra_snapshots
       WHERE id=${id}::uuid AND project_id=${ctx.projectId}::uuid `;
     if (!rows[0]) throw new NotFoundException({ code: 'SNAPSHOT_NOT_FOUND' });
     // Fresh project ACL is checked by the adapter. A new grant may read historical snapshots
@@ -122,24 +122,24 @@ export class AstraSourcesService {
       if (input.capture !== true || input.cursor) throw new BadRequestException({ code: 'EXPLICIT_SNAPSHOT_CAPTURE_REQUIRED' });
       const tree = await this.liveTree(tx, ctx);
       if (tree.entries.reduce((n, e) => n + (e.textSize || 0), 0) > 128 * 1024 * 1024) throw new BadRequestException({ code: 'SNAPSHOT_TEXT_LIMIT', maxBytes: 128 * 1024 * 1024 });
-      const existing = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM docgrid.dg_astra_snapshots WHERE project_id=${ctx.projectId}::uuid AND grant_id=${ctx.grantId}::uuid AND tree_revision=${tree.revision} LIMIT 1`;
+      const existing = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM docgrid_live.dg_astra_snapshots WHERE project_id=${ctx.projectId}::uuid AND grant_id=${ctx.grantId}::uuid AND tree_revision=${tree.revision} LIMIT 1`;
       if (existing[0]) {
         snapshot = await this.loadSnapshot(tx, ctx, existing[0].id);
         await this.event(tx, ctx, 'astra.snapshot.reused', { snapshotId: snapshot.id });
       } else {
       const retained = await tx.$queryRaw<Array<{ snapshots: number; bytes: string }>>`SELECT
-        (SELECT count(*)::int FROM docgrid.dg_astra_snapshots WHERE project_id=${ctx.projectId}::uuid) AS snapshots,
-        COALESCE(sum(octet_length(s.content)),0)::text AS bytes FROM docgrid.dg_astra_snapshot_sources s
-        JOIN docgrid.dg_astra_snapshots p ON p.id=s.snapshot_id WHERE p.project_id=${ctx.projectId}::uuid`;
+        (SELECT count(*)::int FROM docgrid_live.dg_astra_snapshots WHERE project_id=${ctx.projectId}::uuid) AS snapshots,
+        COALESCE(sum(octet_length(s.content)),0)::text AS bytes FROM docgrid_live.dg_astra_snapshot_sources s
+        JOIN docgrid_live.dg_astra_snapshots p ON p.id=s.snapshot_id WHERE p.project_id=${ctx.projectId}::uuid`;
       const nextBytes = tree.entries.reduce((n, e) => n + (e.textSize || 0), 0);
       if (retained[0].snapshots >= 64 || Number(retained[0].bytes) + nextBytes > 512 * 1024 * 1024) throw new BadRequestException({ code: 'SNAPSHOT_RETENTION_LIMIT', maxSnapshots: 64, maxTextBytes: 512 * 1024 * 1024 });
-      const rows = await tx.$queryRaw<Snapshot[]>`INSERT INTO docgrid.dg_astra_snapshots(project_id,grant_id,tree_revision,manifest,cursor_secret)
+      const rows = await tx.$queryRaw<Snapshot[]>`INSERT INTO docgrid_live.dg_astra_snapshots(project_id,grant_id,tree_revision,manifest,cursor_secret)
         VALUES(${ctx.projectId}::uuid,${ctx.grantId}::uuid,${tree.revision},${JSON.stringify({ entries: tree.entries, relations: tree.relations })}::jsonb,${randomBytes(32).toString('hex')})
         RETURNING id,project_id AS "projectId",grant_id AS "grantId",tree_revision AS "treeRevision",manifest,cursor_secret AS "cursorSecret",created_at AS "createdAt"`;
       snapshot = rows[0];
       for (const entry of tree.entries.filter(e => e.kind !== 'folder')) {
         const source = await this.captureSource(tx, ctx, entry);
-        await tx.$executeRaw`INSERT INTO docgrid.dg_astra_snapshot_sources(snapshot_id,source_id,kind,version,hash,extraction_revision,status,title,path,mime,byte_size,content,warnings,pages)
+        await tx.$executeRaw`INSERT INTO docgrid_live.dg_astra_snapshot_sources(snapshot_id,source_id,kind,version,hash,extraction_revision,status,title,path,mime,byte_size,content,warnings,pages)
           VALUES(${snapshot.id}::uuid,${entry.id}::uuid,${source.kind},${source.version},${source.hash},${source.extractionRevision},${source.status},${source.title},${source.path},${source.mime},${source.byteSize},${source.content},${JSON.stringify(source.warnings)}::jsonb,${JSON.stringify(source.pages || [])}::jsonb)`;
       }
       await this.event(tx, ctx, 'astra.snapshot.captured', { snapshotId: snapshot.id, treeRevision: tree.revision, sources: tree.entries.filter(e => e.kind !== 'folder').length });
@@ -150,7 +150,7 @@ export class AstraSourcesService {
     const offset = input.cursor ? readCursor(snapshot.cursorSecret, bind, input.cursor) : 0;
     const allowed = ctx.allowedSourceIds === null ? null : JSON.stringify(ctx.allowedSourceIds);
     const sources = await tx.$queryRaw<any[]>`SELECT source_id AS "sourceId",kind,version,hash,extraction_revision AS "extractionRevision",status,title,path,mime,
-      byte_size::text AS "byteSize",length(content)::int AS "extractedCodePoints",warnings FROM docgrid.dg_astra_snapshot_sources
+      byte_size::text AS "byteSize",length(content)::int AS "extractedCodePoints",warnings FROM docgrid_live.dg_astra_snapshot_sources
       WHERE snapshot_id=${snapshot.id}::uuid AND (${allowed}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${allowed}::jsonb))) ORDER BY source_id LIMIT ${limit + 1} OFFSET ${offset}`;
     const more = sources.length > limit;
     return { output: { snapshotId: snapshot.id, treeRevision: snapshot.treeRevision, createdAt: snapshot.createdAt,
@@ -162,7 +162,7 @@ export class AstraSourcesService {
   private async captureSource(tx: AstraDb, ctx: AstraContext, entry: Entry): Promise<Source> {
     scopeSource(ctx.allowedSourceIds, entry.id);
     if (entry.kind === 'material') {
-      const rows = await tx.$queryRaw<any[]>`SELECT sha256,byte_size,extracted_text AS content,extracted_pages AS pages,extraction_status AS status,mime,encode(sha256(convert_to(extracted_text || extracted_pages::text,'UTF8')),'hex') AS fingerprint FROM docgrid.docgrid_materials
+      const rows = await tx.$queryRaw<any[]>`SELECT sha256,byte_size,extracted_text AS content,extracted_pages AS pages,extraction_status AS status,mime,encode(sha256(convert_to(extracted_text || extracted_pages::text,'UTF8')),'hex') AS fingerprint FROM docgrid_live.docgrid_materials
         WHERE id=${entry.id}::uuid AND project_id=${ctx.projectId}::uuid AND deleted_at IS NULL`;
       const row = rows[0];
       if (!row || row.sha256 !== entry.version) throw new ConflictException({ code: 'SOURCE_INTEGRITY_FAILED', sourceId: entry.id });
@@ -178,14 +178,14 @@ export class AstraSourcesService {
           ...(row.pages?.length ? ['OCR text may contain recognition errors; verify amounts and names against original pages'] : ['Page locators unavailable for this extraction']) ] };
     }
     if (entry.kind === 'artifact') {
-      const rows = await tx.$queryRaw<any[]>`SELECT v.plain_text AS content FROM docgrid.document_versions v JOIN docgrid.dg_astra_documents b ON b.document_id=v.document_id
+      const rows = await tx.$queryRaw<any[]>`SELECT v.plain_text AS content FROM docgrid_live.document_versions v JOIN docgrid_live.dg_astra_documents b ON b.document_id=v.document_id
         WHERE b.project_id=${ctx.projectId}::uuid AND v.document_id=${entry.id}::uuid AND v.version=${Number(entry.version)}`;
       if (!rows[0]) throw new ConflictException({ code: 'SOURCE_VERSION_MISSING', sourceId: entry.id });
       const content = rows[0].content, hash = sha256(content);
       if (hash !== entry.hash) throw new ConflictException({ code: 'SOURCE_INTEGRITY_FAILED', sourceId: entry.id });
       return { sourceId: entry.id, kind: 'artifact', version: entry.version, hash, extractionRevision: hash, status: 'READY', title: entry.title, path: entry.path, mime: 'text/plain; charset=utf-8', byteSize: Buffer.byteLength(content), content, warnings: [] };
     }
-    const rows = await tx.$queryRaw<any[]>`SELECT v.content FROM docgrid.workspace_document_versions v JOIN docgrid.workspace_documents d ON d.id=v.document_id
+    const rows = await tx.$queryRaw<any[]>`SELECT v.content FROM docgrid_live.workspace_document_versions v JOIN docgrid_live.workspace_documents d ON d.id=v.document_id
       WHERE d.id=${entry.id}::uuid AND d.project_id=${ctx.projectId}::uuid AND d.docgrid_deleted_at IS NULL AND v.version=${Number(entry.version)}`;
     if (!rows[0]) throw new ConflictException({ code: 'SOURCE_VERSION_MISSING', sourceId: entry.id });
     const content = rows[0].content;
@@ -198,7 +198,7 @@ export class AstraSourcesService {
   private async source(tx: AstraDb, ctx: AstraContext, snapshotId: string, sourceId: string): Promise<Source> {
     scopeSource(ctx.allowedSourceIds, sourceId);
     const rows = await tx.$queryRaw<Source[]>`SELECT source_id AS "sourceId",kind,version,hash,extraction_revision AS "extractionRevision",status,title,path,mime,byte_size::int AS "byteSize",content,warnings,pages
-      FROM docgrid.dg_astra_snapshot_sources s JOIN docgrid.dg_astra_snapshots p ON p.id=s.snapshot_id
+      FROM docgrid_live.dg_astra_snapshot_sources s JOIN docgrid_live.dg_astra_snapshots p ON p.id=s.snapshot_id
       WHERE s.snapshot_id=${snapshotId}::uuid AND s.source_id=${sourceId}::uuid AND p.project_id=${ctx.projectId}::uuid `;
     if (!rows[0]) throw new NotFoundException({ code: 'SOURCE_NOT_FOUND' });
     return rows[0];
@@ -237,7 +237,7 @@ export class AstraSourcesService {
     if (source.kind !== 'material') throw new BadRequestException({ code: 'UNSUPPORTED', message: 'Original byte access applies to uploaded materials; use version export for canonical documents' });
     const maxBytes = 32 * 1024 * 1024;
     if (source.byteSize > maxBytes) throw new BadRequestException({ code: 'SOURCE_ORIGINAL_SIZE_LIMIT', maxBytes });
-    const rows = await tx.$queryRaw<any[]>`SELECT bytes,storage_key,byte_size,sha256,sha256::text AS hash FROM docgrid.docgrid_materials
+    const rows = await tx.$queryRaw<any[]>`SELECT bytes,storage_key,byte_size,sha256,sha256::text AS hash FROM docgrid_live.docgrid_materials
       WHERE id=${ref.sourceId}::uuid AND project_id=${ctx.projectId}::uuid AND deleted_at IS NULL AND byte_size<=${maxBytes}`;
     const row = rows[0];
     if (!row) throw new NotFoundException({ code: 'SOURCE_ORIGINAL_NOT_FOUND' });
@@ -298,14 +298,14 @@ export class AstraSourcesService {
     const scope = sourceIds === null ? null : JSON.stringify(sourceIds);
     if(mode==='ranked') {
       // Lazily index immutable snapshots, including ones captured before this migration.
-      const pending=await tx.$queryRaw<any[]>`SELECT source_id FROM docgrid.dg_astra_snapshot_sources s
+      const pending=await tx.$queryRaw<any[]>`SELECT source_id FROM docgrid_live.dg_astra_snapshot_sources s
         WHERE snapshot_id=${snapshot.id}::uuid AND status IN ('READY','PARTIAL') AND content<>''
         AND (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb)))
-        AND NOT EXISTS(SELECT 1 FROM docgrid.dg_search_passages p WHERE p.snapshot_id=s.snapshot_id AND p.source_id=s.source_id)`;
+        AND NOT EXISTS(SELECT 1 FROM docgrid_live.dg_search_passages p WHERE p.snapshot_id=s.snapshot_id AND p.source_id=s.source_id)`;
       for(const pendingSource of pending) {
-        const [source]=await tx.$queryRaw<any[]>`SELECT source_id,content,pages FROM docgrid.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND source_id=${pendingSource.source_id}::uuid`;
+        const [source]=await tx.$queryRaw<any[]>`SELECT source_id,content,pages FROM docgrid_live.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND source_id=${pendingSource.source_id}::uuid`;
         const parts=passages(source.content,source.pages);
-        await tx.$executeRaw`INSERT INTO docgrid.dg_search_passages(snapshot_id,source_id,ordinal,start_offset,end_offset,page,content)
+        await tx.$executeRaw`INSERT INTO docgrid_live.dg_search_passages(snapshot_id,source_id,ordinal,start_offset,end_offset,page,content)
           SELECT ${snapshot.id}::uuid,${source.source_id}::uuid,x.ordinal,x.start,x.end,x.page,x.text
           FROM jsonb_to_recordset(${JSON.stringify(parts)}::jsonb) AS x(ordinal int,start int,"end" int,page int,text text) ON CONFLICT DO NOTHING`;
       }
@@ -314,12 +314,12 @@ export class AstraSourcesService {
         replace(plainto_tsquery('simple',regexp_replace(${query},'[А-Яа-яЁё]+','','g'))::text,' & ',' | ')::tsquery AS value)
         SELECT s.source_id AS "sourceId",s.version,s.hash,s.kind,s.title,s.path,s.status,p.page,p.start_offset AS start,p.end_offset AS end,p.content AS snippet,
         ts_rank_cd(p.search_vector,q.value) AS rank
-        FROM docgrid.dg_search_passages p JOIN docgrid.dg_astra_snapshot_sources s USING(snapshot_id,source_id) CROSS JOIN q
+        FROM docgrid_live.dg_search_passages p JOIN docgrid_live.dg_astra_snapshot_sources s USING(snapshot_id,source_id) CROSS JOIN q
         WHERE p.snapshot_id=${snapshot.id}::uuid AND p.search_vector @@ q.value
         AND (${scope}::jsonb IS NULL OR s.source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb)))
         AND (${path}='/' OR s.path=${path} OR left(s.path,length(${path})+1)=${path}||'/')
         ORDER BY rank DESC,s.source_id,p.ordinal LIMIT ${limit+1} OFFSET ${offset}`;
-      const stats=await tx.$queryRaw<any[]>`SELECT status,count(*)::int AS count FROM docgrid.dg_astra_snapshot_sources
+      const stats=await tx.$queryRaw<any[]>`SELECT status,count(*)::int AS count FROM docgrid_live.dg_astra_snapshot_sources
         WHERE snapshot_id=${snapshot.id}::uuid AND (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb)))
         AND (${path}='/' OR path=${path} OR left(path,length(${path})+1)=${path}||'/') GROUP BY status`;
       return {output:{mode,algorithm:'russian-simple-passages-v1',snapshotId:snapshot.id,index:{complete:stats.every(s=>s.status==='READY'),statuses:stats,coverage:'all authorized stored extraction',zeroResultsProveAbsence:false},
@@ -329,11 +329,11 @@ export class AstraSourcesService {
     }
     // Literal search remains available for exact names/numbers and existing clients.
     const rows = await tx.$queryRaw<any[]>`SELECT source_id AS "sourceId",version,hash,status,title,content,extraction_revision AS "extractionRevision"
-      FROM docgrid.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND
+      FROM docgrid_live.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND
       (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb))) AND
       ((${mode}='filename' AND position(lower(${query}) in lower(title))>0) OR (${mode}='fulltext' AND status IN ('READY','PARTIAL') AND position(lower(${query}) in lower(content))>0))
       ORDER BY source_id LIMIT ${limit + 1} OFFSET ${offset}`;
-    const stats = await tx.$queryRaw<any[]>`SELECT status,count(*)::int AS count FROM docgrid.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND
+    const stats = await tx.$queryRaw<any[]>`SELECT status,count(*)::int AS count FROM docgrid_live.dg_astra_snapshot_sources WHERE snapshot_id=${snapshot.id}::uuid AND
       (${scope}::jsonb IS NULL OR source_id::text IN (SELECT jsonb_array_elements_text(${scope}::jsonb))) GROUP BY status`;
     const complete = !stats.some(s => s.status !== 'READY');
     return { output: { mode, algorithm: 'literal-substring-v1', snapshotId: snapshot.id, scope: sourceIds, index: { complete, statuses: stats, coverage: 'stored extraction only', zeroResultsProveAbsence: false },
@@ -353,10 +353,10 @@ export class AstraSourcesService {
     if (source.kind === 'material') return { output: { sourceId: source.sourceId, versions: [{ version: source.version, hash: source.hash }], immutableOriginal: true, truncated: false } };
     const limit = boundedInt(input, 'limit', 20, 1, 50);
     const before = boundedInt(input, 'beforeVersion', Number(source.version) + 1, 1, Number(source.version) + 1);
-    const rows = source.kind === 'artifact' ? await tx.$queryRaw<any[]>`SELECT v.version,v.change_request AS message,v.created_at AS "createdAt",v.plain_text AS content FROM docgrid.document_versions v
-      JOIN docgrid.dg_astra_documents b ON b.document_id=v.document_id WHERE b.document_id=${source.sourceId}::uuid AND b.project_id=${ctx.projectId}::uuid
-      AND v.version<${before} ORDER BY v.version DESC LIMIT ${limit + 1}` : await tx.$queryRaw<any[]>`SELECT v.version,v.message,v.created_at AS "createdAt",v.content FROM docgrid.workspace_document_versions v
-      JOIN docgrid.workspace_documents d ON d.id=v.document_id WHERE d.id=${source.sourceId}::uuid AND d.project_id=${ctx.projectId}::uuid
+    const rows = source.kind === 'artifact' ? await tx.$queryRaw<any[]>`SELECT v.version,v.change_request AS message,v.created_at AS "createdAt",v.plain_text AS content FROM docgrid_live.document_versions v
+      JOIN docgrid_live.dg_astra_documents b ON b.document_id=v.document_id WHERE b.document_id=${source.sourceId}::uuid AND b.project_id=${ctx.projectId}::uuid
+      AND v.version<${before} ORDER BY v.version DESC LIMIT ${limit + 1}` : await tx.$queryRaw<any[]>`SELECT v.version,v.message,v.created_at AS "createdAt",v.content FROM docgrid_live.workspace_document_versions v
+      JOIN docgrid_live.workspace_documents d ON d.id=v.document_id WHERE d.id=${source.sourceId}::uuid AND d.project_id=${ctx.projectId}::uuid
       AND v.version<${before} ORDER BY v.version DESC LIMIT ${limit + 1}`;
     return { output: { sourceId: source.sourceId, snapshotId: snapshot.id, versions: rows.slice(0, limit).map(({ content, ...row }) => ({ ...row, version: String(row.version), hash: sha256(content) })),
       truncated: rows.length > limit, nextBeforeVersion: rows.length > limit ? rows[limit - 1].version : null } };
@@ -471,19 +471,19 @@ export class AstraSourcesService {
     if (proposal.kind === 'structure') {
       const validated = this.structureDiff(ctx, tree.entries, proposal.changes);
       for (const change of validated.changes) {
-        if (change.action === 'create_folder') await tx.$executeRaw`INSERT INTO docgrid.docgrid_folders(project_id,path) VALUES(${ctx.projectId}::uuid,${change.path!})`;
-        else if (change.action === 'remove_empty_folder') await tx.$executeRaw`DELETE FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid AND path=${change.path!}`;
+        if (change.action === 'create_folder') await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_folders(project_id,path) VALUES(${ctx.projectId}::uuid,${change.path!})`;
+        else if (change.action === 'remove_empty_folder') await tx.$executeRaw`DELETE FROM docgrid_live.docgrid_folders WHERE project_id=${ctx.projectId}::uuid AND path=${change.path!}`;
         else {
           const source = tree.entries.find(e => e.id === change.sourceId)!;
           if (source.kind === 'material') {
-            if (change.action === 'move_source') await tx.$executeRaw`UPDATE docgrid.docgrid_materials SET path=${change.path!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
-            else await tx.$executeRaw`UPDATE docgrid.docgrid_materials SET title=${change.title!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
+            if (change.action === 'move_source') await tx.$executeRaw`UPDATE docgrid_live.docgrid_materials SET path=${change.path!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
+            else await tx.$executeRaw`UPDATE docgrid_live.docgrid_materials SET title=${change.title!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
           } else if (source.kind === 'artifact') {
-            if (change.action === 'move_source') await tx.$executeRaw`UPDATE docgrid.dg_astra_documents SET path=${change.path!} WHERE document_id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
-            else await tx.$executeRaw`UPDATE docgrid.prepared_legal_documents SET title=${change.title!} WHERE id=${change.sourceId!}::uuid AND EXISTS(SELECT 1 FROM docgrid.dg_astra_documents WHERE document_id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid)`;
+            if (change.action === 'move_source') await tx.$executeRaw`UPDATE docgrid_live.dg_astra_documents SET path=${change.path!} WHERE document_id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
+            else await tx.$executeRaw`UPDATE docgrid_live.prepared_legal_documents SET title=${change.title!} WHERE id=${change.sourceId!}::uuid AND EXISTS(SELECT 1 FROM docgrid_live.dg_astra_documents WHERE document_id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid)`;
           } else {
-            if (change.action === 'move_source') await tx.$executeRaw`UPDATE docgrid.workspace_documents SET path=${change.path!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
-            else await tx.$executeRaw`UPDATE docgrid.workspace_documents SET title=${change.title!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
+            if (change.action === 'move_source') await tx.$executeRaw`UPDATE docgrid_live.workspace_documents SET path=${change.path!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
+            else await tx.$executeRaw`UPDATE docgrid_live.workspace_documents SET title=${change.title!} WHERE id=${change.sourceId!}::uuid AND project_id=${ctx.projectId}::uuid`;
           }
         }
       }
@@ -494,12 +494,12 @@ export class AstraSourcesService {
     if (proposal.kind === 'relation_reject') {
       const relation = tree.relations.find(r => r.id === proposal.relationId);
       if (!relation) throw new NotFoundException({ code: 'RELATION_NOT_FOUND' });
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_relations SET status='REJECTED' WHERE id=${proposal.relationId}::uuid AND project_id=${ctx.projectId}::uuid AND status='CONFIRMED'`;
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_relations SET status='REJECTED' WHERE id=${proposal.relationId}::uuid AND project_id=${ctx.projectId}::uuid AND status='CONFIRMED'`;
       await this.event(tx, ctx, 'astra.relation.rejected', { relationId: proposal.relationId });
       return { output: { relationId: proposal.relationId, status: 'REJECTED', treeRevision: (await this.liveTree(tx, ctx)).revision } };
     }
     for (const ref of [proposal.fromRef, proposal.toRef]) await this.validateSourceRefs(tx, ctx, ref.snapshotId, [ref]);
-    const rows = await tx.$queryRaw<any[]>`INSERT INTO docgrid.dg_astra_relations(project_id,from_ref,to_ref,relation_type,basis,author_id,agent_ref,status,operation_id)
+    const rows = await tx.$queryRaw<any[]>`INSERT INTO docgrid_live.dg_astra_relations(project_id,from_ref,to_ref,relation_type,basis,author_id,agent_ref,status,operation_id)
       VALUES(${ctx.projectId}::uuid,${JSON.stringify(proposal.fromRef)}::jsonb,${JSON.stringify(proposal.toRef)}::jsonb,${proposal.type},${proposal.basis},${ctx.humanActorId || ctx.ownerId},${ctx.agentRef},'CONFIRMED',${operation.id}::uuid) RETURNING id`;
     const after = await this.liveTree(tx, ctx);
     await this.event(tx, ctx, 'astra.relation.confirmed', { relationId: rows[0].id, operationId: operation.id });
@@ -537,7 +537,7 @@ export class AstraSourcesService {
   }
 
   private async event(tx: AstraDb, ctx: AstraContext, eventType: string, metadata: unknown) {
-    await tx.$executeRaw`INSERT INTO docgrid.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata)
+    await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata)
       VALUES(${ctx.projectId}::uuid,${ctx.humanActorId || ctx.ownerId},${eventType},'repository',${ctx.projectId}::uuid,${JSON.stringify({ operationId: ctx.operationId, grantId: ctx.grantId, agentRef: ctx.agentRef, ...metadata as object })}::jsonb)`;
   }
 }
@@ -590,5 +590,6 @@ export const ASTRA_SOURCE_SCHEMAS: Record<string, { description: string; inputSc
     currency: { type: 'string', minLength: 1, maxLength: 12 }, unit: { type: 'string', minLength: 1, maxLength: 50 }, period: { type: 'string', minLength: 1, maxLength: 100 }, duplicatePolicy: { enum: ['reject', 'include'], default: 'reject' },
   }, ['rows', 'currency', 'unit', 'period']),
 };
+
 
 

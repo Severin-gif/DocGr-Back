@@ -64,7 +64,7 @@ export class AstraWorkflowService {
         throw new ConflictException('STALE_PLAN: review the current plan and scope');
       }
       await this.sources.validateSourceRefs(tx, ctx, binding.source_snapshot_id, binding.source_refs);
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_document_tasks SET state='APPROVED', approved_by=${ctx.humanActorId ?? ctx.ownerId}, approved_at=now()
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_tasks SET state='APPROVED', approved_by=${ctx.humanActorId ?? ctx.ownerId}, approved_at=now()
         WHERE task_id=${binding.task_id}::uuid`;
       // Deliberately never QUEUED: legacy workers must not pick up an ASTRA task.
       await tx.documentTask.update({ where: { id: binding.task_id }, data: { confirmedAt: new Date() } });
@@ -72,7 +72,7 @@ export class AstraWorkflowService {
         scopeDigest: binding.scope_digest, status: 'APPROVED', nextAction: 'docgrid_submit_document' } };
     }
     if (operation.tool === 'docgrid_propose_patch' || operation.tool === 'docgrid_restore_version') {
-      const rows = await tx.$queryRaw<any[]>`SELECT * FROM docgrid.dg_astra_document_proposals
+      const rows = await tx.$queryRaw<any[]>`SELECT * FROM docgrid_live.dg_astra_document_proposals
         WHERE id=${uuidInput(approval, 'proposalId')}::uuid AND project_id=${ctx.projectId}::uuid FOR UPDATE`;
       const proposal = rows[0];
       if (!proposal || proposal.status !== 'PROPOSED' || proposal.content_hash !== approval.contentHash) {
@@ -83,7 +83,7 @@ export class AstraWorkflowService {
       await this.sources.validateSourceRefs(tx, ctx, proposal.source_snapshot_id, proposal.source_refs);
       const output = await this.appendVersion(tx, ctx, document, this.normalizeContent(proposal.content),
         proposal.source_snapshot_id, proposal.source_refs, operation.tool === 'docgrid_restore_version' ? 'Restore historical content' : 'Accepted addressed patch');
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_document_proposals SET status='ACCEPTED',accepted_by=${ctx.humanActorId ?? ctx.ownerId},accepted_at=now()
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_proposals SET status='ACCEPTED',accepted_by=${ctx.humanActorId ?? ctx.ownerId},accepted_at=now()
         WHERE id=${proposal.id}::uuid`;
       return { output };
     }
@@ -97,12 +97,12 @@ export class AstraWorkflowService {
       if (binding.state === 'SUBMITTED' || binding.plan_revision !== approval.planRevision || binding.plan_digest !== approval.planDigest) {
         throw new ConflictException('Cannot cancel a submitted or superseded plan');
       }
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_document_tasks SET state='CANCELLED' WHERE task_id=${binding.task_id}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_tasks SET state='CANCELLED' WHERE task_id=${binding.task_id}::uuid`;
       await tx.documentTask.update({ where: { id: binding.task_id }, data: { status: 'CANCELLED' } });
       return;
     }
     if (['docgrid_propose_patch', 'docgrid_restore_version'].includes(operation.tool)) {
-      const changed = await tx.$executeRaw`UPDATE docgrid.dg_astra_document_proposals SET status='CANCELLED'
+      const changed = await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_proposals SET status='CANCELLED'
         WHERE id=${uuidInput(approval, 'proposalId')}::uuid AND project_id=${ctx.projectId}::uuid AND status='PROPOSED'`;
       if (changed !== 1) throw new ConflictException('Proposal cannot be cancelled');
     }
@@ -122,7 +122,7 @@ export class AstraWorkflowService {
     const attachmentIds=[...new Set(input.attachmentIds.map(id=>uuidInput({id},'id')))];
     if(attachmentIds.some(id=>!sourceRefs.some(r=>r.sourceId===id)))throw new BadRequestException('Attachment not in reviewed sources');
     const missingData=this.strings(input.missingData,'missingData',60,2000);
-    const folders=await tx.$queryRaw<Array<{path:string}>>`SELECT path FROM docgrid.docgrid_folders WHERE project_id=${ctx.projectId}::uuid`;
+    const folders=await tx.$queryRaw<Array<{path:string}>>`SELECT path FROM docgrid_live.docgrid_folders WHERE project_id=${ctx.projectId}::uuid`;
     const existing=new Set(folders.map(f=>f.path)),changes:Array<Record<string,unknown>>=[];
     const destination=attachmentIds.length?folder+'/Приложения':folder;
     const parts=destination.split('/').filter(Boolean);
@@ -148,7 +148,7 @@ export class AstraWorkflowService {
       await this.approve(tx,ctx,{...operation,tool:'docgrid_plan_document',approval:plan},{});
       const submitted=await this.submit(tx,ctx,{taskId:plan.taskId,planRevision:plan.planRevision,planDigest:plan.planDigest,content});
       const artifact=objectInput(submitted.output);
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_documents SET path=${a.folder as string} WHERE document_id=${artifact.artifactId as string}::uuid AND project_id=${ctx.projectId}::uuid`;
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_documents SET path=${a.folder as string} WHERE document_id=${artifact.artifactId as string}::uuid AND project_id=${ctx.projectId}::uuid`;
       artifacts.push(artifact);
     }
     return {output:{kind:'package',status:'DRAFT',folder:a.folder,artifacts,missingData:a.missingData,externalActions:false}};
@@ -183,7 +183,7 @@ export class AstraWorkflowService {
         request: purpose, plan: { ...normalizedPlan, executionTrack: 'DOCGRID_AGENT', requestedResult },
         planRevision, confirmedAt: null, status: 'AWAITING_CONFIRMATION',
       } });
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_document_tasks SET plan_digest=${planDigest},scope_digest=${scopeDigest},
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_tasks SET plan_digest=${planDigest},scope_digest=${scopeDigest},
         plan_revision=${planRevision},source_snapshot_id=${sourceSnapshotId}::uuid,source_refs=${JSON.stringify(sourceRefs)}::jsonb,
         state='AWAITING_CONFIRMATION',approved_by=NULL,approved_at=NULL,operation_id=${ctx.operationId}::uuid WHERE task_id=${taskId}::uuid`;
     } else {
@@ -191,7 +191,7 @@ export class AstraWorkflowService {
       const task = await tx.documentTask.create({ data: { ownerId: ctx.ownerId, operation: 'CREATE', request: purpose,
         status: 'AWAITING_CONFIRMATION', plan: { ...normalizedPlan, executionTrack: 'DOCGRID_AGENT', requestedResult }, planRevision, attachments: [] } });
       taskId = task.id;
-      await tx.$executeRaw`INSERT INTO docgrid.dg_astra_document_tasks
+      await tx.$executeRaw`INSERT INTO docgrid_live.dg_astra_document_tasks
         (task_id,project_id,grant_id,operation_id,plan_digest,scope_digest,plan_revision,source_snapshot_id,source_refs,state)
         VALUES (${taskId}::uuid,${ctx.projectId}::uuid,${ctx.grantId}::uuid,${ctx.operationId}::uuid,${planDigest},${scopeDigest},
         ${planRevision},${sourceSnapshotId}::uuid,${JSON.stringify(sourceRefs)}::jsonb,'AWAITING_CONFIRMATION')`;
@@ -216,12 +216,12 @@ export class AstraWorkflowService {
     const content = this.normalizeContent(input.content);
     await this.sources.validateSourceRefs(tx, ctx, binding.source_snapshot_id, binding.source_refs);
     const document = await tx.preparedLegalDocument.create({ data: { ownerId: ctx.ownerId, title: content.title, currentVersion: 0, nextVersion: 1 } });
-    await tx.$executeRaw`INSERT INTO docgrid.dg_astra_documents(document_id,project_id,task_id)
+    await tx.$executeRaw`INSERT INTO docgrid_live.dg_astra_documents(document_id,project_id,task_id)
       VALUES (${document.id}::uuid,${ctx.projectId}::uuid,${binding.task_id}::uuid)`;
     const output = await this.appendVersion(tx, ctx, document, content, binding.source_snapshot_id, binding.source_refs, 'Approved document plan');
     await tx.documentTask.update({ where: { id: binding.task_id }, data: { documentId: document.id,
       status: 'READY', resultVersion: 1, completedAt: new Date() } });
-    await tx.$executeRaw`UPDATE docgrid.dg_astra_document_tasks SET state='SUBMITTED' WHERE task_id=${binding.task_id}::uuid`;
+    await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_tasks SET state='SUBMITTED' WHERE task_id=${binding.task_id}::uuid`;
     return { output };
   }
 
@@ -238,7 +238,7 @@ export class AstraWorkflowService {
     const meta = restored?.meta ?? base.meta;
     await this.sources.validateSourceRefs(tx, ctx, meta.source_snapshot_id, meta.source_refs);
     const contentHash = digest(content);
-    const rows = await tx.$queryRaw<Array<{ id: string }>>`INSERT INTO docgrid.dg_astra_document_proposals
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`INSERT INTO docgrid_live.dg_astra_document_proposals
       (operation_id,project_id,document_id,base_version,content,changes,source_snapshot_id,source_refs,content_hash,status)
       VALUES (${ctx.operationId}::uuid,${ctx.projectId}::uuid,${artifactId}::uuid,${baseVersion},${JSON.stringify(content)}::jsonb,
       ${JSON.stringify(changes)}::jsonb,${meta.source_snapshot_id}::uuid,${JSON.stringify(meta.source_refs)}::jsonb,${contentHash},'PROPOSED') RETURNING id`;
@@ -258,7 +258,7 @@ export class AstraWorkflowService {
       status: 'CONTENT_READY', title: content.title, structuredContent: content as unknown as Prisma.InputJsonValue,
       plainText: this.toPlainText(content), sourceVersionId: previous?.id ?? null, changeRequest: reason,
       createdBy: ctx.humanActorId ?? ctx.ownerId, readyAt: new Date() } });
-    await tx.$executeRaw`INSERT INTO docgrid.dg_astra_document_versions
+    await tx.$executeRaw`INSERT INTO docgrid_live.dg_astra_document_versions
       (version_id,operation_id,source_snapshot_id,source_refs,content_hash,agent_ref)
       VALUES (${row.id}::uuid,${ctx.operationId}::uuid,${snapshotId}::uuid,${JSON.stringify(sourceRefs)}::jsonb,${digest(content)},${ctx.agentRef})`;
     return this.artifact(tx, ctx, document.id, nextVersion);
@@ -281,7 +281,7 @@ export class AstraWorkflowService {
         docxObjectKey: stored.docxObjectKey, docxSize: stored.docxSize, checksum: stored.checksum,
         ...(stored.pdfObjectKey ? { status: 'READY' as const, pdfObjectKey: stored.pdfObjectKey, pdfSize: stored.pdfSize } : {}),
       } });
-      await tx.$executeRaw`UPDATE docgrid.dg_astra_document_versions SET export_status=${stored.pdfObjectKey ? 'READY' : stored.previewError ? 'PREVIEW_FAILED' : 'DOCX_READY'},
+      await tx.$executeRaw`UPDATE docgrid_live.dg_astra_document_versions SET export_status=${stored.pdfObjectKey ? 'READY' : stored.previewError ? 'PREVIEW_FAILED' : 'DOCX_READY'},
         pdf_hash=${stored.pdfHash ?? null},preview_error=${stored.previewError ?? null} WHERE version_id=${row.id}::uuid`;
     }
     return { output: await this.artifact(tx, ctx, id, number) };
@@ -343,7 +343,7 @@ export class AstraWorkflowService {
 
   private async requireDocument(tx: AstraDb, ctx: AstraContext, id: string) {
     const bindings = await tx.$queryRaw<Array<{ document_id: string; grant_id: string }>>`SELECT d.document_id,t.grant_id
-      FROM docgrid.dg_astra_documents d JOIN docgrid.dg_astra_document_tasks t ON t.task_id=d.task_id
+      FROM docgrid_live.dg_astra_documents d JOIN docgrid_live.dg_astra_document_tasks t ON t.task_id=d.task_id
       WHERE d.document_id=${id}::uuid AND d.project_id=${ctx.projectId}::uuid`;
     if (!bindings.length) throw new NotFoundException('Artifact not found in the authorized project');
     if (ctx.principalKind !== 'human' && ctx.allowedSourceIds !== null && bindings[0].grant_id !== ctx.grantId && !ctx.allowedSourceIds.includes(id)) {
@@ -356,10 +356,10 @@ export class AstraWorkflowService {
 
   private async version(tx: AstraDb, ctx: AstraContext, id: string, number: number, lock = false) {
     const document = await this.requireDocument(tx, ctx, id);
-    if (lock) await tx.$queryRaw`SELECT id FROM docgrid.document_versions WHERE document_id=${id}::uuid AND version=${number} FOR UPDATE`;
+    if (lock) await tx.$queryRaw`SELECT id FROM docgrid_live.document_versions WHERE document_id=${id}::uuid AND version=${number} FOR UPDATE`;
     const row = await tx.documentVersion.findUnique({ where: { documentId_version: { documentId: id, version: number } } });
     if (!row) throw new NotFoundException('Exact artifact version not found');
-    const rows = await tx.$queryRaw<VersionMeta[]>`SELECT * FROM docgrid.dg_astra_document_versions WHERE version_id=${row.id}::uuid`;
+    const rows = await tx.$queryRaw<VersionMeta[]>`SELECT * FROM docgrid_live.dg_astra_document_versions WHERE version_id=${row.id}::uuid`;
     if (!rows[0]) throw new NotFoundException('Version binding not found');
     // File-scoped grants cannot read results based on sources outside their current scope.
     await this.sources.validateSourceRefs(tx, ctx, rows[0].source_snapshot_id, rows[0].source_refs);
@@ -367,7 +367,7 @@ export class AstraWorkflowService {
   }
 
   private async binding(tx: AstraDb, ctx: AstraContext, id: string): Promise<Binding> {
-    const rows = await tx.$queryRaw<Binding[]>`SELECT * FROM docgrid.dg_astra_document_tasks
+    const rows = await tx.$queryRaw<Binding[]>`SELECT * FROM docgrid_live.dg_astra_document_tasks
       WHERE task_id=${id}::uuid AND project_id=${ctx.projectId}::uuid AND grant_id=${ctx.grantId}::uuid FOR UPDATE`;
     if (!rows[0]) throw new NotFoundException('Document task not found');
     return rows[0];
@@ -523,5 +523,6 @@ export const ASTRA_WORKFLOW_SCHEMAS: Record<string, { description: string; input
   docgrid_compare_versions: { description: 'Compare two exact canonical versions by addressed blocks, reporting before/after and content hashes.',
     inputSchema: schema(['artifactId', 'fromVersion', 'toVersion'], { artifactId: uuidSchema, fromVersion: versionSchema, toVersion: versionSchema }) },
 };
+
 
 

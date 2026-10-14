@@ -43,7 +43,7 @@ export async function createApplication() {
   server.get('/health', (_req, res) => res.json({ status: 'ok', service: 'docgrid-back' }));
   server.get('/ready', async (_req, res) => {
     try {
-      await app.get(PrismaService).$queryRaw`SELECT id FROM docgrid.workspace_projects LIMIT 1`;
+      await app.get(PrismaService).$queryRaw`SELECT id FROM docgrid_live.workspace_projects LIMIT 1`;
       res.json({ status: 'ready', database: 'docgrid', storage: process.env.DOCGRID_MATERIAL_STORAGE || 'database' });
     } catch { res.status(503).json({ status: 'not_ready', database: 'docgrid' }); }
   });
@@ -66,3 +66,4 @@ if (require.main === module) {
     process.exitCode = 1;
   });
 }
+
