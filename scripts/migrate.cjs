@@ -1,6 +1,7 @@
 // A separate schema also gives DocGrid its own Prisma migration ledger.
 const {spawnSync}=require('node:child_process');
 const {Client}=require('pg');
+const {provisionRuntimePrivileges}=require('./runtime-privileges.cjs');
 const {migrationConnection}=require('./migration-connection.cjs');
 const {MIGRATION,recoverDocxMigration}=require('./recover-docx-migration.cjs');
 async function main(){
@@ -16,6 +17,18 @@ async function main(){
    prisma('resolve','--applied',MIGRATION);
   }
   prisma('deploy');
+  await provisionRuntimePrivileges(db,process.env.DATABASE_URL);
+  // Test the actual API credentials, not the privileged migration connection.
+  const runtime=new Client({connectionString:process.env.DATABASE_URL,connectionTimeoutMillis:10000});
+  try {
+   await runtime.connect();
+   await runtime.query('SELECT id FROM docgrid_live."User" LIMIT 0');
+   const denied=await runtime.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='docgrid_live' AND
+    ((c.relkind IN ('r','p') AND NOT (has_table_privilege(current_user,c.oid,'SELECT') AND has_table_privilege(current_user,c.oid,'INSERT') AND has_table_privilege(current_user,c.oid,'UPDATE') AND has_table_privilege(current_user,c.oid,'DELETE')))
+     OR (c.relkind='S' AND NOT (has_sequence_privilege(current_user,c.oid,'USAGE') AND has_sequence_privilege(current_user,c.oid,'SELECT'))))`);
+   if(denied.rows.length)throw Error('Runtime role lacks required docgrid_live object privileges');
+  } finally { await runtime.end(); }
  }catch(error){
   if(error.code==='42501'){
    const role=(await db.query('SELECT current_user AS role')).rows[0].role;

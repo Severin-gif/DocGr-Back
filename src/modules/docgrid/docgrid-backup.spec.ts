@@ -34,7 +34,7 @@ describe("backup scheduling boundary (pg_dump fixture)", () => {
     const status = await service.backup();
     expect(status.lastError).toBeNull();
     expect(status.lastSuccess).toBeTruthy();
-    const names = await readdir(process.env.DOCGRID_BACKUP_DIR!);
+    const names = await readdir(join(process.env.DOCGRID_BACKUP_DIR!, "docgrid_live"));
     expect(names.filter((n) => n.endsWith(".dump"))).toHaveLength(1);
     expect(
       names.some((n) => n.endsWith(".partial") || n.endsWith(".lock")),
@@ -42,7 +42,7 @@ describe("backup scheduling boundary (pg_dump fixture)", () => {
     expect(
       JSON.parse(
         await readFile(
-          join(process.env.DOCGRID_BACKUP_DIR!, "status.json"),
+          join(process.env.DOCGRID_BACKUP_DIR!, "docgrid_live", "status.json"),
           "utf8",
         ),
       ).lastSuccess,
@@ -56,13 +56,13 @@ describe("backup scheduling boundary (pg_dump fixture)", () => {
     await dump("printf incomplete; exit 1");
     expect((await service.backup()).lastError).toContain("failed");
     expect(service.status().lastSuccess).toBe(success);
-    const names = await readdir(process.env.DOCGRID_BACKUP_DIR!);
+    const names = await readdir(join(process.env.DOCGRID_BACKUP_DIR!, "docgrid_live"));
     expect(names.filter((n) => n.endsWith(".dump"))).toHaveLength(1);
     expect(names.some((n) => n.endsWith(".partial"))).toBe(false);
   });
   it("does not delete a lock owned by another process", async () => {
-    await mkdir(process.env.DOCGRID_BACKUP_DIR!);
-    const lock = join(process.env.DOCGRID_BACKUP_DIR!, ".backup.lock");
+    await mkdir(join(process.env.DOCGRID_BACKUP_DIR!, "docgrid_live"), { recursive: true });
+    const lock = join(process.env.DOCGRID_BACKUP_DIR!, "docgrid_live", ".backup.lock");
     await writeFile(lock, "other");
     await dump("printf snapshot");
     expect((await new DocGridBackupService().backup()).lastError).toContain(
