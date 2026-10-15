@@ -48,3 +48,9 @@ configuration; changing only the URL cannot switch this generated Prisma client.
 Validation: `npm run test:fresh-schema` runs two real Prisma migration startups,
 project creation and upload/download beside legacy-owner tables and a failed old
 ledger, then verifies the legacy rows, columns, owners and ledger are unchanged.
+
+For a separate migration account, see [migration role](migration-database-role.md): startup provisions live-only runtime grants and checks API credentials before serving requests. Existing deployments receive the same idempotent ACL repair; no migration SQL or legacy ledger is rewritten. Schema ownership stays as provisioned; tables/sequences stay owned by the migration creator.
+
+Backups now use `DOCGRID_BACKUP_DIR/docgrid_live/` with independent status, lock and retention. A legacy root status never postpones the first live backup. Verify a completed dump there and test restoration in an isolated database. Preserve old root files and any separate legacy backups.
+
+Compatibility: API and data contracts are unchanged; existing live rows are preserved. Before rollout verify the migration role can grant rights on all live objects, the runtime username is explicit in DATABASE_URL, and the durable backup mount permits creating the schema subdirectory. Do not run db push/reset, recreate a schema, or modify production merely to validate this patch. Applying ACL repair and deployment to production requires separate authorization.

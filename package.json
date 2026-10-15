@@ -8,13 +8,14 @@
     "start": "node dist/server.js",
     "check": "prisma generate --schema prisma/live/schema.prisma && tsc --noEmit",
     "test": "npm run build && node --test dist/*.test.js && npm run test:domain",
-    "test:domain": "node scripts/migration-connection-test.cjs && node scripts/recover-docx-migration-test.cjs && node scripts/recover-docx-startup-test.cjs && node scripts/project-slug-migration-test.cjs && node scripts/docgrid-core-test.cjs && node scripts/astra-docgrid-test.cjs && node scripts/docgrid-upload-extraction-test.cjs && node scripts/office-view-test.cjs && node scripts/standalone-http-test.cjs --embedded --fresh-only",
+    "test:domain": "node scripts/runtime-privileges-test.cjs && node scripts/prisma-default-test.cjs && node scripts/backup-test.cjs && node scripts/migration-connection-test.cjs && node scripts/recover-docx-migration-test.cjs && node scripts/recover-docx-startup-test.cjs && node scripts/project-slug-migration-test.cjs && node scripts/docgrid-core-test.cjs && node scripts/astra-docgrid-test.cjs && node scripts/docgrid-upload-extraction-test.cjs && node scripts/office-view-test.cjs && node scripts/standalone-http-test.cjs --embedded --fresh-only",
     "db:migrate": "node scripts/migrate.cjs",
     "test:postgres": "node scripts/standalone-http-test.cjs",
     "test:fresh-schema": "npm run build && node scripts/standalone-http-test.cjs --embedded --fresh-only",
     "test:embedded": "npm run build && node scripts/standalone-http-test.cjs --embedded",
     "test:tools": "npm run build && node scripts/document-tools-queue-test.cjs && node scripts/pdf-tools-http-test.cjs && node scripts/pdf-tools-resources-test.cjs && python3 scripts/document-tools-test.py",
-    "test:workflows": "npm run build && node scripts/standalone-http-test.cjs --embedded --workflows-only"
+    "test:workflows": "npm run build && node scripts/standalone-http-test.cjs --embedded --workflows-only",
+    "predev": "prisma generate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",
@@ -52,6 +53,8 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "prisma": {
+    "schema": "prisma/live/schema.prisma"
   }
 }
-

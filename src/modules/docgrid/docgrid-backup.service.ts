@@ -26,8 +26,17 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
   private get directory() {
     return process.env.DOCGRID_BACKUP_DIR?.trim() || "";
   }
+  private get schema() {
+    const schema = new URL(process.env.DATABASE_URL || "postgresql://localhost/db").searchParams.get("schema") || "docgrid_live";
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schema)) throw Error("Invalid backup schema");
+    return schema;
+  }
+  private get schemaDirectory() {
+    return join(this.directory, this.schema);
+  }
   status() {
     return {
+      schema: this.schema,
       enabled: !!this.directory,
       active: this.active,
       lastSuccess: this.lastSuccess,
@@ -43,9 +52,9 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
     }
     try {
       const saved = JSON.parse(
-        await readFile(join(this.directory, "status.json"), "utf8"),
+        await readFile(join(this.schemaDirectory, "status.json"), "utf8"),
       );
-      this.lastSuccess = saved.lastSuccess || null;
+      this.lastSuccess = saved.schema === this.schema && Number.isFinite(Date.parse(saved.lastSuccess)) ? saved.lastSuccess : null;
     } catch {}
     const run = () => void this.backup();
     this.timer = setInterval(run, 24 * 60 * 60 * 1000);
@@ -67,12 +76,12 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
     try {
       if (!isAbsolute(this.directory) || !process.env.DATABASE_URL)
         throw Error("Backup configuration is incomplete");
-      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await mkdir(this.schemaDirectory, { recursive: true, mode: 0o700 });
       // Atomic directory lock works across replicas sharing the same mounted volume.
-      lock = await open(join(this.directory, ".backup.lock"), "wx", 0o600);
+      lock = await open(join(this.schemaDirectory, ".backup.lock"), "wx", 0o600);
       const name =
         "docgrid-" + new Date().toISOString().replace(/[:.]/g, "-") + ".dump";
-      temporary = join(this.directory, name + ".partial");
+      temporary = join(this.schemaDirectory, name + ".partial");
       const url = new URL(process.env.DATABASE_URL);
       const env = {
         ...process.env,
@@ -88,7 +97,7 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
         await new Promise<void>((resolve, reject) => {
           const child = spawn(
             "pg_dump",
-            ["--format=custom", "--no-owner", "--no-acl", "--schema=docgrid_live"],
+            ["--format=custom", "--no-owner", "--no-acl", "--schema=" + this.schema],
             { env, stdio: ["ignore", output.fd, "ignore"] },
           );
           const timeout = setTimeout(
@@ -111,20 +120,20 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
         await output.close();
       }
       if ((await stat(temporary)).size === 0) throw Error("Empty backup");
-      await rename(temporary, join(this.directory, name));
+      await rename(temporary, join(this.schemaDirectory, name));
       temporary = "";
       this.lastSuccess = new Date().toISOString();
       this.lastError = null;
       await writeFile(
-        join(this.directory, "status.json"),
-        JSON.stringify({ lastSuccess: this.lastSuccess }),
+        join(this.schemaDirectory, "status.json"),
+        JSON.stringify({ schema: this.schema, lastSuccess: this.lastSuccess }),
         { mode: 0o600 },
       );
-      const backups = (await readdir(this.directory))
+      const backups = (await readdir(this.schemaDirectory))
         .filter((n) => /^docgrid-.*\.dump$/.test(n))
         .sort()
         .reverse();
-      for (const old of backups.slice(14)) await rm(join(this.directory, old));
+      for (const old of backups.slice(14)) await rm(join(this.schemaDirectory, old));
       this.log.log("Database backup completed");
     } catch (e) {
       this.lastError =
@@ -138,7 +147,7 @@ export class DocGridBackupService implements OnModuleInit, OnModuleDestroy {
       if (temporary) await rm(temporary, { force: true }).catch(() => {});
       if (lock) {
         await lock.close();
-        await rm(join(this.directory, ".backup.lock"), { force: true });
+        await rm(join(this.schemaDirectory, ".backup.lock"), { force: true });
       }
       this.active = false;
     }
