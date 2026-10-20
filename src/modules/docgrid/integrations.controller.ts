@@ -16,7 +16,7 @@ export class IntegrationsController {
     const projects=await this.db.$queryRaw<any[]>`SELECT p.id,p.name,p.slug,
       (SELECT count(*)::int FROM docgrid_live.dg_astra_grants g WHERE g.project_id=p.id AND g.owner_id=${user} AND g.builtin=false AND g.revoked_at IS NULL AND g.expires_at>now() AND g.used_operations<g.max_operations) AS "activeConnections"
       FROM docgrid_live.workspace_projects p WHERE p.owner_id=${user} AND (${cursor}::uuid IS NULL OR p.id>${cursor}::uuid) ORDER BY p.id LIMIT 51`;
-    return {projects:projects.slice(0,50),nextCursor:projects.length>50?projects[49].id:null,
+    return {accountOAuthEnabled:config.DOCGRID_ACCOUNT_OAUTH_ENABLED === "true",projects:projects.slice(0,50),nextCursor:projects.length>50?projects[49].id:null,
       mcpUrl:`${config.DOCGRID_PUBLIC_ORIGIN}/api/docgrid/mcp`,apiUrl:`${config.DOCGRID_PUBLIC_ORIGIN}/api/docgrid/v1`,
       openapiUrl:`${config.DOCGRID_PUBLIC_ORIGIN}/api/docgrid/openapi.json`};
   }

@@ -3,6 +3,8 @@ import { z } from "zod";
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  DOCGRID_ACCOUNT_OAUTH_ENABLED: z.enum(["true", "false"]).default("false"),
+  DOCGRID_CONSENT_URL: z.string().url().default("https://docgrid.ru/oauth/consent"),
   DOCGRID_PUBLIC_ORIGIN: z.string().url().default("https://api.docgrid.ru"),
   PORT: z.coerce.number().int().positive().max(65535).default(4000),
   CORS_ORIGINS: z.string().default("https://docgrid.ru,https://www.docgrid.ru,http://localhost:3000"),
@@ -24,3 +26,6 @@ export const allowedOrigins = [...new Set(
   config.CORS_ORIGINS.split(",").map((item) => item.trim()).filter(Boolean),
 )];
 
+
+const consentUrl = new URL(config.DOCGRID_CONSENT_URL);
+if (consentUrl.username || consentUrl.password || consentUrl.hash || consentUrl.search || (consentUrl.protocol !== "https:" && config.NODE_ENV === "production")) throw new Error("Invalid DOCGRID_CONSENT_URL");
