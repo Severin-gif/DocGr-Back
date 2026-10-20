@@ -1,6 +1,18 @@
-FROM node:24-bookworm-slim AS build
+FROM node:24-bookworm-slim AS base
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
+# Timeweb builds have a 1680s limit. Avoid the slow plain-HTTP package path
+# and retry stalled transfers before the whole build is killed.
+# Slim images can lack system CAs: bootstrap verified HTTPS with Node's
+# bundled Mozilla roots, then use the installed Debian CA store normally.
+RUN node -e "require('node:fs').writeFileSync('/tmp/docgrid-apt-ca.pem', require('node:tls').rootCertificates.join('\n'))" \
+    && sed -i 's|http://deb.debian.org/|https://deb.debian.org/|g' /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80docgrid-network \
+    && apt-get -o Acquire::https::CAInfo=/tmp/docgrid-apt-ca.pem -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::https::CAInfo=/tmp/docgrid-apt-ca.pem install -y --no-install-recommends openssl ca-certificates \
+    && rm -f /tmp/docgrid-apt-ca.pem \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM base AS build
 COPY package*.json ./
 COPY prisma ./prisma
 RUN npm ci --no-audit --no-fund
@@ -9,10 +21,9 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:24-bookworm-slim AS production
-WORKDIR /app
+FROM base AS production
 ENV NODE_ENV=production PORT=4000
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3 python3-venv ghostscript python3-xlrd python3-openpyxl python3-lxml antiword util-linux libreoffice-writer fonts-dejavu-core postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng python3 python3-venv ghostscript python3-xlrd python3-openpyxl python3-lxml antiword util-linux libreoffice-writer fonts-dejavu-core postgresql-client && rm -rf /var/lib/apt/lists/*
 COPY scripts/document-tools-requirements.txt /tmp/document-tools-requirements.txt
 RUN python3 -m venv /opt/docgrid-tools && /opt/docgrid-tools/bin/pip install --no-cache-dir -r /tmp/document-tools-requirements.txt
 ENV DOCGRID_TOOLS_PYTHON=/opt/docgrid-tools/bin/python
