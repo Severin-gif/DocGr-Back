@@ -56,6 +56,8 @@ export function createAgentMcpRouter(options: AgentTransportOptions): Router {
       const tools = Array.isArray(catalog.tools) ? catalog.tools : [];
       if (body.method === 'tools/list') return result({ tools: tools.map((tool: any) => ({
         name: tool.name, description: tool.description,
+        securitySchemes: [{ type: 'oauth2', scopes: options.scopes ? (tool.name === 'docgrid_get_capabilities' ? [] : [tool.name]) : ['docgrid'] }],
+        _meta: { securitySchemes: [{ type: 'oauth2', scopes: options.scopes ? (tool.name === 'docgrid_get_capabilities' ? [] : [tool.name]) : ['docgrid'] }] },
         inputSchema: { type: 'object', additionalProperties: false, required: ['runId', 'requestKey', 'input'], properties: {
           runId: { type: 'string', minLength: 1, maxLength: 120, description: 'Stable identifier for this task.' },
           requestKey: { type: 'string', minLength: 1, maxLength: 120, description: 'Unique operation key. Reuse only for an exact retry with the same runId and input.' },

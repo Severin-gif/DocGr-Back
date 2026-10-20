@@ -31,7 +31,7 @@ async function run(args) {
   }
   await check.end();
   await run(['scripts/migrate.cjs']);await run(['scripts/migrate.cjs']);
-  process.env.NODE_ENV='test';process.env.DOCGRID_IDENTITY_JWT_SECRET='a'.repeat(64);process.env.DOCGRID_SERVICE_TOKEN='b'.repeat(64);process.env.DOCGRID_MATERIAL_STORAGE='database';delete process.env.LEGAL_CORE_URL;
+  process.env.NODE_ENV='test';process.env.DOCGRID_ACCOUNT_OAUTH_ENABLED='true';process.env.DOCGRID_IDENTITY_JWT_SECRET='a'.repeat(64);process.env.DOCGRID_SERVICE_TOKEN='b'.repeat(64);process.env.DOCGRID_MATERIAL_STORAGE='database';delete process.env.LEGAL_CORE_URL;
   const {PrismaService}=require('../dist/prisma/prisma.service');
   app=await require('../dist/server').createApplication();console.log('App initialized');await app.listen(0,'127.0.0.1');console.log('App listening');db=app.get(PrismaService);
   const base=await app.getUrl();console.log('Acceptance target',base,'DB',new URL(process.env.DATABASE_URL).host);
@@ -62,7 +62,7 @@ async function run(args) {
    } finally {await verify.end();}
    clearTimeout(timeout);passed=true;console.log('PASS fresh schema: two deploys, real Prisma identity/project, upload/download, old data/owners/failed ledger untouched');return;
   }
-  if(process.argv.includes('--integrations-only')){await require('./integrations-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
+  if(process.argv.includes('--integrations-only')){await require('./account-oauth-acceptance.cjs')({call,jwt,base,p,prefix,db});await require('./integrations-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   if(process.argv.includes('--discussions-only')){await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   if(process.argv.includes('--workflows-only')){await require('./discussion-workflow-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   await require('./folder-share-acceptance.cjs')({call,jwt,base,db});

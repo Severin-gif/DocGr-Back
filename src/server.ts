@@ -51,6 +51,7 @@ export async function createApplication() {
     // URL parsing only: requests dispatch to local services, never to this host.
     upstream: 'http://docgrid.internal', serviceToken: config.DOCGRID_SERVICE_TOKEN,
     timeoutMs: config.UPSTREAM_TIMEOUT_MS, maxResponseBytes: config.MAX_RESPONSE_BYTES,
+    consentUrl: config.DOCGRID_ACCOUNT_OAUTH_ENABLED === "true" ? config.DOCGRID_CONSENT_URL : undefined, scopes: config.DOCGRID_ACCOUNT_OAUTH_ENABLED === "true" ? app.get(AstraService).publicCatalog().tools.map(t => t.name) : undefined,
     publicOrigin: config.DOCGRID_PUBLIC_ORIGIN, allowedOrigins: [...allowedOrigins, config.DOCGRID_PUBLIC_ORIGIN],
     fetcher: localAgentTransport(app.get(AstraService), app.get(AgentOAuthCodeStore)),
   };

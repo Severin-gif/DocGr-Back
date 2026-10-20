@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 
 export type AgentTransportOptions = {
   upstream: string; serviceToken: string; timeoutMs: number; maxResponseBytes: number;
-  publicOrigin: string; allowedOrigins: string[]; fetcher?: typeof fetch;
+  consentUrl?: string; scopes?: string[]; publicOrigin: string; allowedOrigins: string[]; fetcher?: typeof fetch;
 };
 export const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
