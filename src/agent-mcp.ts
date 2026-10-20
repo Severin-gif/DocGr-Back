@@ -9,16 +9,16 @@ export function createAgentMcpRouter(options: AgentTransportOptions): Router {
   router.use(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const path = new URL(req.originalUrl, options.publicOrigin).pathname;
-    const match = new RegExp(`^/api/docgrid/mcp/(${UUID})$`).exec(path);
+    const match = new RegExp(`^/api/docgrid/mcp(?:/(${UUID}))?$`).exec(path);
     if (!match || Object.keys(req.query).length) return res.status(404).json({ error: 'Unknown MCP resource' });
-    const projectId = match[1]!, resource = options.publicOrigin + path;
+    let projectId = match[1]; const resource = options.publicOrigin + path;
     const origin = req.header('origin');
     if (origin && !options.allowedOrigins.includes(origin)) return res.status(403).json({ error: 'Origin is not allowed' });
     let token = readAgentToken(req.header('authorization'));
     if (!token && req.header('authorization')?.startsWith('Bearer dgmc_')) {
       try {
         const access = unseal(options.serviceToken, 'access', req.header('authorization')!.slice('Bearer dgmc_'.length));
-        if (access.resource === resource && access.projectId === projectId) token = readAgentToken(`Bearer ${access.grant}`);
+        if (access.resource === resource && (!projectId || access.projectId === projectId)) { token = readAgentToken(`Bearer ${access.grant}`); projectId = access.projectId; }
       } catch { /* handled as an unauthenticated request below */ }
     }
     const unauthorized = () => {
@@ -32,7 +32,9 @@ export function createAgentMcpRouter(options: AgentTransportOptions): Router {
     try {
       // Never cache a grant: revocation, expiry and project ownership are checked
       // even for initialize, ping and tools/list. Discovery consumes no quota.
-      const catalog = await agentJson(options, `/api/docgrid/agents/catalog?projectId=${projectId}`, token, undefined, controller.signal);
+      const catalog = await agentJson(options, `/api/docgrid/agents/catalog${projectId ? `?projectId=${projectId}` : ''}`, token, undefined, controller.signal);
+      projectId = projectId || catalog.grant?.projectId;
+      if (!projectId) throw new UpstreamError(502);
       if (req.method !== 'POST') return res.status(405).set('Allow', 'POST').end();
       if (!req.is('application/json')) return res.status(415).json({ error: 'Expected application/json' });
       const version = req.header('mcp-protocol-version');

@@ -27,7 +27,7 @@ module.exports=async function({call,prefix,p,material,jwt,db}){
   const send=(extra={},status=201)=>call(root+'/turns','POST',{requestKey:randomUUID(),instruction:'Разбери документы',mode:'helper',task:'sort',sourceIds:[material.id],...extra},jwt('owner'),status);
   const requestKey=randomUUID();const sent=await send({requestKey});
   const repeated=await send({requestKey});assert.equal(sent.id,repeated.id);assert.equal(calls,1);
-  const turns=await call(root+'/turns');assert.ok(turns[0].proposalId,'selected action automatically prepares a proposal');assert.equal(turns[0].context.total,1);assert.equal(turns[0].result.classifications[0].sourceId,material.id);
+  const turns=await call(root+'/turns');assert.ok(turns[0].proposalId,'selected action automatically prepares a proposal');assert.equal(turns[0].context.total,1);assert.equal(turns[0].context.modelInput,undefined);const savedRequest=(await db.$queryRaw`SELECT context->'modelInput' AS input FROM docgrid_live.dg_discussion_turns WHERE id=${sent.id}::uuid`)[0].input;assert.equal(savedRequest.instruction,'Разбери документы');assert.ok(savedRequest.sources.some(s=>s.text.includes('Original evidence')));assert.equal(turns[0].result.classifications[0].sourceId,material.id);
   const proposed=await call(root+'/turns/'+sent.id+'/proposal','POST',{},jwt('owner'),201);
   assert.equal(proposed.status,'needs_user_action');
   assert.equal((await call(prefix+'/files')).materials.find(m=>m.id===material.id).path,'/Case/Nested');

@@ -31,10 +31,10 @@ export class AstraHumanController {
 }
 
 @UseGuards(AstraAgentGuard)
-@Controller(['api/docgrid/agents', 'api/docgrid/astra'])
+@Controller(['api/docgrid/agents', 'api/docgrid/astra', 'api/docgrid/v1'])
 export class AstraAgentController {
   constructor(private readonly astra: AstraService) {}
-  @Get('catalog') describe(@Req() request: { astraCredential: string }, @Query('projectId', ParseUUIDPipe) project: string) { return this.astra.describeGrant(request.astraCredential, project); }
+  @Get('catalog') describe(@Req() request: { astraCredential: string }, @Query('projectId', new ParseUUIDPipe({optional:true})) project: string) { return this.astra.describeGrant(request.astraCredential, project); }
   @Post('tools/:toolName') execute(@Req() request: { astraCredential: string }, @Param('toolName') tool: string, @Body() input: unknown) { return this.astra.execute(request.astraCredential, tool, input); }
   @Get('artifacts/:artifactId/versions/:version/:format') async file(@Req() request: { astraCredential: string }, @Query('projectId', ParseUUIDPipe) project: string, @Param('artifactId', ParseUUIDPipe) artifact: string, @Param('version', ParseIntPipe) version: number, @Param('format') format: string, @Res({ passthrough: true }) response: Response) { return fileResponse(await this.astra.artifactFile(request.astraCredential, true, project, artifact, version, format), response); }
   @Get('sources/:sourceId/original') async original(@Req() request: { astraCredential: string }, @Query('projectId', ParseUUIDPipe) project: string, @Query('snapshotId', ParseUUIDPipe) snapshot: string, @Query('hash') hash: string, @Param('sourceId', ParseUUIDPipe) source: string, @Res({ passthrough: true }) response: Response) { return fileResponse(await this.astra.sourceOriginal(request.astraCredential, project, source, snapshot, hash), response); }

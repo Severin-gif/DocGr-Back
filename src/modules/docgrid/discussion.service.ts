@@ -67,7 +67,7 @@ export class DiscussionService {
     await this.thread(user,project,id);
     // A terminated process must not leave a conversation permanently blocked.
     await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET status='failed',error='Запрос прерван. Отправьте сообщение повторно.',updated_at=now() WHERE discussion_id=${id}::uuid AND status='running' AND updated_at<now()-interval '10 minutes'`;
-    return this.db.$queryRaw<any[]>`SELECT id,instruction,mode,status,result,context,provider,error,proposal_id AS "proposalId",created_at AS "createdAt" FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid ORDER BY created_at,id LIMIT 200`;
+    return this.db.$queryRaw<any[]>`SELECT id,instruction,mode,status,result,context-'modelInput' AS context,provider,error,proposal_id AS "proposalId",created_at AS "createdAt" FROM docgrid_live.dg_discussion_turns WHERE discussion_id=${id}::uuid ORDER BY created_at,id LIMIT 200`;
   }
   async send(user:string,project:string,id:string,raw:unknown,workflowId?:string){
     const r=objectInput(raw);assertKeys(r,['requestKey','instruction','mode','task','sourceIds','folder','offset','query','model']);
@@ -155,8 +155,11 @@ export class DiscussionService {
       const token=process.env.DOCGRID_SERVICE_TOKEN||'',base=process.env.DOCGRID_ORCHESTRA_URL||'';
       if(token.length<32||!base)throw new ServiceUnavailableException('Настройте DOCGRID_ORCHESTRA_URL и DOCGRID_SERVICE_TOKEN в Doc-Back');
       const url=new URL(base);if(!['https:','http:'].includes(url.protocol)||url.username||url.password)throw new ServiceUnavailableException('Некорректный адрес AI-Orchestra');
+      const modelInput={model,mode,task,instruction,sources,projectContext,history:[...(history.length>4?[{role:'user',text:'Ранее в этом диалоге (сокращённо; прежние ответы не являются доказательствами): '+history.slice(4).reverse().map(h=>h.instruction.slice(0,300)+' / '+h.result.answer.slice(0,300)).join('\n').slice(-11500)}]:[]),...history.slice(0,4).reverse().flatMap(h=>[{role:'user',text:h.instruction},{role:'assistant',text:h.result.answer}])]};
+      // Persist exactly the bounded request sent to Orchestra, before any network call.
+      await this.db.$executeRaw`UPDATE docgrid_live.dg_discussion_turns SET context=context || ${JSON.stringify({modelInput})}::jsonb WHERE id=${turnId}::uuid`;
       timeCall=await this.timeBudget.reserve(project);
-      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/discussion',{method:'POST',redirect:'error',signal:AbortSignal.timeout(85000),headers:{'Content-Type':'application/json','x-docgrid-service-token':token},body:JSON.stringify({model,mode,task,instruction,sources,projectContext,history:[...(history.length>4?[{role:'user',text:'Ранее в этом диалоге (сокращённо; прежние ответы не являются доказательствами): '+history.slice(4).reverse().map(h=>h.instruction.slice(0,300)+' / '+h.result.answer.slice(0,300)).join('\n').slice(-11500)}]:[]),...history.slice(0,4).reverse().flatMap(h=>[{role:'user',text:h.instruction},{role:'assistant',text:h.result.answer}])]} )});
+      const response=await fetch(base.replace(/\/$/,'')+'/internal/docgrid/discussion',{method:'POST',redirect:'error',signal:AbortSignal.timeout(85000),headers:{'Content-Type':'application/json','x-docgrid-service-token':token},body:JSON.stringify(modelInput)});
       if(!response.ok||!response.body){await response.body?.cancel();throw new BadGatewayException(`ИИ недоступен (${response.status}). Проверьте настройки AI-Orchestra.`);}
       const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;
       try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>1000000){await reader.cancel();throw new Error('Response limit');}chunks.push(value);}}finally{reader.releaseLock();}

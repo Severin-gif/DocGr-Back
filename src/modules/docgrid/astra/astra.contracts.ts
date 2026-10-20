@@ -20,8 +20,8 @@ export type AstraOperation = {
   error: unknown; createdAt: Date; updatedAt: Date;
   passport?: unknown;
 };
-export const ASTRA_CATALOG_VERSION = 'docgrid-agents-v1.1.0';
-export const ASTRA_SPEC_VERSION = 'DOCGRID-AGENTS/1.1';
+export const ASTRA_CATALOG_VERSION = 'docgrid-agents-v1.2.0';
+export const ASTRA_SPEC_VERSION = 'DOCGRID-AGENTS/1.2';
 
 export function objectInput(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException('Expected an object');
