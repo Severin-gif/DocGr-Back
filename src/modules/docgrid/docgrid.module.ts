@@ -1,3 +1,4 @@
+import { IntegrationsController, IntegrationSchemaController } from './integrations.controller';
 import { DiscussionWorkflowService } from './discussion-workflow.service';
 import { PdfUploadInterceptor } from './pdf-upload.interceptor';
 import { PdfToolsController } from './pdf-tools.controller';
@@ -34,7 +35,7 @@ import { AstraUploadService } from './astra/astra-upload.service';
 
 @Module({
   imports: [],
-  controllers: [PdfToolsController,DocumentToolsController,DocGridUserAdminController,FolderSharePublicController,FolderShareOwnerController,CourtPackageController, DiscussionController, DocGridController, DocGridAdminController, AstraAgentController, AstraHumanController],
+  controllers: [IntegrationsController, IntegrationSchemaController,PdfToolsController,DocumentToolsController,DocGridUserAdminController,FolderSharePublicController,FolderShareOwnerController,CourtPackageController, DiscussionController, DocGridController, DocGridAdminController, AstraAgentController, AstraHumanController],
   providers: [DiscussionWorkflowService, PdfUploadInterceptor,DocumentToolsService,DocGridUserAdminService,FolderShareService,CourtPackageService,AiTimeBudgetService,ProjectContextService,DocGridOcrService,DiscussionService,DocumentFileService, { provide: S3Service, inject: [ConfigService], useFactory: (config: ConfigService) => new S3Service(new ConfigService(Object.fromEntries(['ENDPOINT', 'BUCKET', 'REGION', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'FORCE_PATH_STYLE'].map(key => [`S3_${key}`, config.get(`DOCGRID_S3_${key}`)])))) }, AgentOAuthCodeStore, DocGridMaterialStorageService, DocGridBackupService, DocGridService, DocGridAdminGuard, DocGridIdentityGuard, AstraAgentGuard, AstraService, AstraSourcesService, AstraWorkflowService, AstraUploadService],
   exports: [DocGridService, AstraService, AgentOAuthCodeStore],
 })

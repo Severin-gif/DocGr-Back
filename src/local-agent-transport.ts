@@ -13,7 +13,7 @@ export function localAgentTransport(agents: AstraService, codes: AgentOAuthCodeS
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       let result: unknown;
       if (init?.method === 'GET' && url.pathname === '/api/docgrid/agents/catalog') {
-        result = await agents.describeGrant(token, url.searchParams.get('projectId') || '');
+        result = await agents.describeGrant(token, url.searchParams.get('projectId') || undefined);
       } else if (init?.method === 'POST' && /^\/api\/docgrid\/agents\/tools\/docgrid_[a-z_]+$/.test(url.pathname)) {
         result = await agents.execute(token, url.pathname.split('/').pop()!, body);
       } else if (init?.method === 'POST' && url.pathname === '/api/docgrid/internal/agent-oauth/codes') {

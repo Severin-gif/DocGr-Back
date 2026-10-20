@@ -62,6 +62,7 @@ async function run(args) {
    } finally {await verify.end();}
    clearTimeout(timeout);passed=true;console.log('PASS fresh schema: two deploys, real Prisma identity/project, upload/download, old data/owners/failed ledger untouched');return;
   }
+  if(process.argv.includes('--integrations-only')){await require('./integrations-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   if(process.argv.includes('--discussions-only')){await require('./discussion-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   if(process.argv.includes('--workflows-only')){await require('./discussion-workflow-acceptance.cjs')({call,prefix,p,material,jwt,db});clearTimeout(timeout);passed=true;return;}
   await require('./folder-share-acceptance.cjs')({call,jwt,base,db});

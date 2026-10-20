@@ -11,7 +11,7 @@ import { isAllowedDocGridRequest } from './proxy-policy.js';
 
 const project = '11111111-1111-4111-8111-111111111111', other = '22222222-2222-4222-8222-222222222222';
 const grant = 'dga_' + 'a'.repeat(43), secret = 'server-only-'.repeat(4);
-test('generic MCP + OAuth: scoped discovery, bound single-use codes, revocation and stable retries', async () => {
+for (const universal of [false,true]) test(`${universal ? 'universal' : 'project'} MCP + OAuth: scoped discovery, bound single-use codes, revocation and stable retries`, async () => {
   const codes = new Map<string, any>(); const calls: any[] = []; let revoked = false; let catalogUnavailable = false;
   const options: AgentTransportOptions = {
     upstream: 'https://core.invalid', serviceToken: secret, timeoutMs: 1000, maxResponseBytes: 100000,
@@ -29,7 +29,7 @@ test('generic MCP + OAuth: scoped discovery, bound single-use codes, revocation 
       assert.equal(headers.get('x-docgrid-agent-token'), grant);
       if (revoked || new URL(String(url)).searchParams.get('projectId') === other) return Response.json({}, { status: 403 });
       if (path.endsWith('/catalog') && catalogUnavailable) return Response.json({}, { status: 503 });
-      if (path.endsWith('/catalog')) return Response.json({ grant: { agentRef: 'Any model', expiresAt: new Date(Date.now() + 3600000).toISOString(), remainingOperations: 100 },
+      if (path.endsWith('/catalog')) return Response.json({ grant: { projectId: project, agentRef: 'Any model', expiresAt: new Date(Date.now() + 3600000).toISOString(), remainingOperations: 100 },
         tools: [{ name: 'docgrid_list_tree', description: 'Read tree', inputSchema: { type: 'object', properties: {} }, mutating: false }] });
       calls.push({ path, body }); return Response.json({ status: 'completed', output: { tree: [] } });
     }) as typeof fetch,
@@ -40,8 +40,9 @@ test('generic MCP + OAuth: scoped discovery, bound single-use codes, revocation 
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   app.use(createAgentOAuthRouter(options));
   app.use('/api/docgrid/mcp', createAgentMcpRouter(options));
-  const resource = `${options.publicOrigin}/api/docgrid/mcp/${project}`;
-  const rpc = (method: string, params: any = {}, bearer = grant, extra: any = {}) => fetch(`${base}/api/docgrid/mcp/${project}`, { method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json', ...extra }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+  const resourcePath = `/api/docgrid/mcp${universal ? '' : '/' + project}`;
+  const resource = options.publicOrigin + resourcePath;
+  const rpc = (method: string, params: any = {}, bearer = grant, extra: any = {}) => fetch(`${base}${resourcePath}`, { method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json', ...extra }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
   const jsonPost = (path: string, body: any) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual' });
   try {
     assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25' }, 'human.jwt')).status, 401);
@@ -73,7 +74,7 @@ test('generic MCP + OAuth: scoped discovery, bound single-use codes, revocation 
     const untrusted = new URLSearchParams(query); untrusted.set('redirect_uri', 'https://attacker.test/callback');
     const rejected = await fetch(`${base}/api/docgrid/oauth/authorize?${untrusted}`, { redirect: 'manual' });
     assert.equal(rejected.status, 400); assert.equal(rejected.headers.get('location'), null);
-    query.set('resource', `https://API.DOCGRID.TEST:443/api/docgrid/mcp/${project}`);
+    query.set('resource', `https://API.DOCGRID.TEST:443${resourcePath}`);
     const consentPage = await fetch(`${base}/api/docgrid/oauth/authorize?${query}`);
     assert.equal(consentPage.status, 200);
     const html = await consentPage.text(), ticket = /name="ticket" value="([^"]+)"/.exec(html)![1]!;

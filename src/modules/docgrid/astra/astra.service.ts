@@ -1,3 +1,4 @@
+import { CHAT_AUDIT_TOOLS, CHAT_AUDIT_SCHEMAS, assertChatScope, executeChatAudit, chatReviewStatus } from './chat-audit';
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -18,10 +19,10 @@ const MUTATING = /_(plan|submit|propose|restore|export|cancel|upload)_/;
 export class AstraService {
   constructor(private readonly prisma: PrismaService, private readonly sources: AstraSourcesService, private readonly workflow: AstraWorkflowService, private readonly uploads: AstraUploadService) {}
 
-  private tools(): string[] { return [...new Set([...CORE_TOOLS, ...ASTRA_SOURCE_TOOLS, ...ASTRA_WORKFLOW_TOOLS, ...ASTRA_UPLOAD_TOOLS])]; }
+  private tools(): string[] { return [...new Set([...CORE_TOOLS, ...ASTRA_SOURCE_TOOLS, ...ASTRA_WORKFLOW_TOOLS, ...ASTRA_UPLOAD_TOOLS, ...CHAT_AUDIT_TOOLS])]; }
   private isMutation(tool: string, input: Record<string, unknown> = {}): boolean { return MUTATING.test(tool) || (tool === 'docgrid_get_snapshot' && input.capture === true); }
   private catalog() {
-    const schemas={...ASTRA_SOURCE_SCHEMAS,...ASTRA_WORKFLOW_SCHEMAS,...ASTRA_UPLOAD_SCHEMAS};
+    const schemas={...ASTRA_SOURCE_SCHEMAS,...ASTRA_WORKFLOW_SCHEMAS,...ASTRA_UPLOAD_SCHEMAS,...CHAT_AUDIT_SCHEMAS};
     return {
       catalogVersion: ASTRA_CATALOG_VERSION, specVersion: ASTRA_SPEC_VERSION, executionTrack: 'DOCGRID_AGENT',
       transport:{method:'POST',path:'/api/docgrid/agents/tools/{toolName}',authentication:'Authorization: Bearer <DocGrid grant>',
@@ -35,6 +36,7 @@ export class AstraService {
       limitations: ['No model execution or paid calls', 'Unsupported capabilities return UNSUPPORTED', 'Cancellation supports pending proposals and approved plans before document submission; execution is synchronous and atomic'],
     };
   }
+  publicCatalog() { return this.catalog(); }
   private async requireProject(tx: AstraDb, ownerId: string, projectId: string, action: 'read' | 'write' | 'owner' = 'read'): Promise<void> {
     const access = await tx.$queryRaw<{blocked: boolean}[]>`SELECT (access_blocked_at IS NOT NULL) AS blocked FROM docgrid_live."User" WHERE id=${ownerId}`;
     if (!access[0] || access[0].blocked) throw new ForbiddenException('Доступ к DocGrid заблокирован');
@@ -72,7 +74,15 @@ export class AstraService {
     await tx.$executeRaw`INSERT INTO docgrid_live.docgrid_events(project_id,actor_id,event_type,entity_type,entity_id,metadata) VALUES (${ctx.projectId}::uuid,${ctx.ownerId},${eventType},'astra_operation',${ctx.operationId}::uuid,${JSON.stringify({ agentRef: ctx.agentRef, grantRef: ctx.grantId, runId: ctx.runId, traceId: ctx.traceId, metadata })}::jsonb)`;
   }
   // Discovery authenticates the live grant but does not spend the operation budget.
-  async describeGrant(token: string, projectId: string) {
+  async projectForToken(token: string): Promise<string> {
+    if (!/^dga_[A-Za-z0-9_-]{43}$/.test(token)) throw new UnauthorizedException('Invalid DocGrid key');
+    const tokenHash=createHash('sha256').update(token).digest('hex');
+    const rows=await this.prisma.$queryRaw<{projectId:string}[]>`SELECT project_id AS "projectId" FROM docgrid_live.dg_astra_grants WHERE token_hash=${tokenHash} AND builtin=false`;
+    if(!rows[0]) throw new UnauthorizedException('Invalid DocGrid key');
+    return rows[0].projectId;
+  }
+  async describeGrant(token: string, projectId?: string) {
+    projectId = projectId || await this.projectForToken(token);
     return this.prisma.$transaction(async tx => {
       const grant = await this.authorizedGrant(tx, token, projectId, 'docgrid_get_capabilities', false);
       return { ...this.catalog(), tools: this.catalog().tools.filter(tool => tool.name === 'docgrid_get_capabilities' || grant.actions.includes(tool.name)),
@@ -96,6 +106,7 @@ export class AstraService {
       if (!Array.isArray(input.allowedSourceIds) || input.allowedSourceIds.length > 500) throw new BadRequestException('Invalid allowedSourceIds');
       allowedSourceIds = [...new Set(input.allowedSourceIds.map(id => uuidInput({ id },'id')))].sort();
     }
+    if (actions.some(action => (CHAT_AUDIT_TOOLS as readonly string[]).includes(action))) assertChatScope(allowedSourceIds);
     const bodyDigest = digest({ agentRef,actions,expiresAt:expiresAt.toISOString(),maxOperations,allowedSourceIds });
     return this.prisma.$transaction(async tx => {
       await this.requireProject(tx,ownerId,projectId,'owner');
@@ -149,13 +160,25 @@ export class AstraService {
   async listOperations(ownerId:string,projectId:string) {
     return this.prisma.$transaction(async tx=>{
       await this.requireProject(tx,ownerId,projectId);
-      const operations=await tx.$queryRaw<unknown[]>`SELECT id,grant_id AS "grantId",passport->>'actorRef' AS "agentRef",tool,status,run_id AS "runId",trace_id AS "traceId",created_at AS "createdAt",updated_at AS "updatedAt",approval_digest AS "approvalDigest",CASE WHEN error IS NULL THEN NULL ELSE jsonb_build_object('status',error->'status','response',jsonb_strip_nulls(jsonb_build_object('code',left(error#>>'{response,code}',80),'message',left(COALESCE(error#>>'{response,message}',error->>'response','Operation failed'),500)))) END AS error,jsonb_strip_nulls(jsonb_build_object('artifactId',result->'artifactId','version',result->'version','taskId',result->'taskId','planRevision',result->'planRevision','title',result->'title')) AS result FROM docgrid_live.dg_astra_operations WHERE project_id=${projectId}::uuid ORDER BY created_at DESC LIMIT 100`;
+      const operations=await tx.$queryRaw<unknown[]>`SELECT id,grant_id AS "grantId",passport->>'actorRef' AS "agentRef",tool,status,run_id AS "runId",trace_id AS "traceId",created_at AS "createdAt",updated_at AS "updatedAt",approval_digest AS "approvalDigest",CASE WHEN error IS NULL THEN NULL ELSE jsonb_build_object('status',error->'status','response',jsonb_strip_nulls(jsonb_build_object('code',left(error#>>'{response,code}',80),'message',left(COALESCE(error#>>'{response,message}',error->>'response','Operation failed'),500)))) END AS error,jsonb_strip_nulls(jsonb_build_object('artifactId',result->'artifactId','version',result->'version','taskId',result->'taskId','planRevision',result->'planRevision','title',result->'title')) AS result FROM docgrid_live.dg_astra_operations WHERE project_id=${projectId}::uuid AND grant_id NOT IN (SELECT id FROM docgrid_live.dg_astra_grants WHERE owner_id<>${ownerId} AND actions ?| ARRAY['docgrid_list_discussions','docgrid_read_chat_turn','docgrid_submit_chat_review']) ORDER BY created_at DESC LIMIT 100`;
       return {operations};
     });
   }
-  async getOperation(ownerId:string,projectId:string,id:string) {return this.prisma.$transaction(async tx=>{await this.requireProject(tx,ownerId,projectId);return this.operation(tx,projectId,id);});}
+  async getOperation(ownerId:string,projectId:string,id:string) {
+    return this.prisma.$transaction(async tx=>{
+      await this.requireProject(tx,ownerId,projectId);
+      const operation=await this.operation(tx,projectId,id),grant=await this.grantById(tx,operation.grantId);
+      if(grant.actions.some(tool=>(CHAT_AUDIT_TOOLS as readonly string[]).includes(tool))&&grant.ownerId!==ownerId) throw new NotFoundException('Operation not found');
+      return this.withReviewStatus(tx,this.context(grant,operation),operation);
+    });
+  }
+  private async withReviewStatus(tx:AstraDb,ctx:AstraContext,operation:AstraOperation) {
+    if(operation.tool==='docgrid_submit_chat_review'&&operation.status==='completed') return {...operation,currentReviewStatus:await chatReviewStatus(tx,ctx,operation.result)};
+    return operation;
+  }
 
   private async dispatch(tx:AstraDb,ctx:AstraContext,tool:string,input:Record<string,unknown>,grant:Grant):Promise<AstraDomainResult> {
+    if((CHAT_AUDIT_TOOLS as readonly string[]).includes(tool)) return executeChatAudit(tx,ctx,tool,input);
     if(tool==='docgrid_get_capabilities') {assertKeys(input,[]);return {output:{...this.catalog(),tools:this.catalog().tools.filter(item=>item.name==='docgrid_get_capabilities'||grant.actions.includes(item.name)),grant:{...this.publicGrant(grant),remainingOperations:grant.maxOperations-grant.usedOperations-1}}};}
     if(CORE_TOOLS.includes(tool)) {
       assertKeys(input,['operationId']);const operation=await this.operation(tx,ctx.projectId,uuidInput(input,'operationId'));
@@ -172,7 +195,7 @@ export class AstraService {
         await this.event(tx,ctx,'astra.operation.cancelled',{targetOperationId:operation.id});
         return {output:await this.operation(tx,ctx.projectId,operation.id)};
       }
-      return {output:operation};
+      return {output:await this.withReviewStatus(tx,ctx,operation)};
     }
     if((ASTRA_WORKFLOW_TOOLS as readonly string[]).includes(tool))return this.workflow.execute(tx,ctx,tool,input);
     if((ASTRA_SOURCE_TOOLS as readonly string[]).includes(tool))return this.sources.execute(tx,ctx,tool,input);
@@ -180,6 +203,8 @@ export class AstraService {
     return unsupported(tool);
   }
   async execute(token:string,tool:string,raw:unknown) {
+    const body=objectInput(raw);
+    if(body.projectId===undefined) raw={...body,projectId:await this.projectForToken(token)};
     return this.executeAuthorized(tool,raw,(tx,projectId,mutation)=>this.authorizedGrant(tx,token,projectId,tool,mutation));
   }
   async builtinAccess(user: string, project: string, write = false) {
