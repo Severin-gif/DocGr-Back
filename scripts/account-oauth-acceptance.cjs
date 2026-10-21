@@ -2,6 +2,13 @@ const assert=require('node:assert/strict');
 const {createHash,randomUUID}=require('node:crypto');
 module.exports=async function({call,jwt,base,p,prefix,db}) {
  const origin='https://api.docgrid.ru', resource=origin+'/api/docgrid/mcp';
+ // Both discovery documents must include the accepted legacy scope and tools.
+ for(const path of ['/.well-known/oauth-protected-resource/api/docgrid/mcp','/.well-known/oauth-authorization-server/api/docgrid/oauth','/api/docgrid/oauth/.well-known/oauth-authorization-server']){
+  const response=await fetch(base+path);assert.equal(response.status,200);
+  const metadata=await response.json();assert.ok(metadata.scopes_supported.includes('docgrid'));
+  assert.ok(metadata.scopes_supported.includes('docgrid_get_project'));
+  assert.equal(new Set(metadata.scopes_supported).size,metadata.scopes_supported.length);
+ }
  const redirect='http://127.0.0.1:8765/callback';
  const client=await call('/api/docgrid/oauth/register','POST',{client_name:'External SDK acceptance',redirect_uris:[redirect]},null,201);
  const verifier='v'.repeat(64),challenge=createHash('sha256').update(verifier).digest('base64url');
@@ -40,6 +47,8 @@ module.exports=async function({call,jwt,base,p,prefix,db}) {
  } finally {await sdk.close();}
  await decide((await prepare(await begin())).receipt,{actions:['docgrid_read_source']},'owner',400);
  await decide((await prepare(await begin(),'stranger')).receipt,{},'stranger',404);
+ const legacy=await prepare(await begin('docgrid'));assert.ok(legacy.tools.some(t=>t.name==='docgrid_get_project'));
+ await decide(legacy.receipt,{decision:'deny'});
  const denied=await decide((await prepare(await begin())).receipt,{decision:'deny'});assert.equal(new URL(denied.redirectUrl).searchParams.get('error'),'access_denied');
  const fixed=await prepare(await begin('docgrid_get_project','/'+p.id));await decide(fixed.receipt,{projectId:randomUUID()},'owner',400);
  await prepare('tampered','owner',400);

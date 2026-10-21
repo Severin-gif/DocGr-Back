@@ -73,3 +73,8 @@ Sources checked 2026-10-20:
 - https://developers.openai.com/plugins/build/auth
 - https://developers.openai.com/plugins/deploy/app-review
 - https://developers.openai.com/plugins/deploy/submission
+
+OAuth discovery advertises the legacy `docgrid` scope alongside tool-specific
+scopes in both authorization-server and protected-resource metadata. Legacy
+`docgrid` requests still require explicit project/tool consent; discovery does
+not grant any permission. Prefer tool-specific scopes for least privilege.

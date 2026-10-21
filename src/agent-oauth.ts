@@ -13,6 +13,7 @@ const validRedirect = (s: string) => {
 export type Consent = { clientId: string; redirect: string; resource: string; projectId?: string; challenge: string; state: string; name: string; nonce: string; scopes?: string[]; exp: number };
 export function createAgentOAuthRouter(options: AgentTransportOptions): Router {
   const router = Router(); const base = options.publicOrigin, oauth = `${base}/api/docgrid/oauth`;
+  const supportedScopes = [...new Set(['docgrid', ...(options.scopes || [])])];
   const resourcePattern = new RegExp(`^/api/docgrid/mcp(?:/(${UUID}))?$`);
   const projectOf = (raw: unknown) => {
     const resource = text(raw, 2048), url = new URL(resource);
@@ -28,11 +29,11 @@ export function createAgentOAuthRouter(options: AgentTransportOptions): Router {
   });
   router.get(['/.well-known/oauth-protected-resource/api/docgrid/mcp','/.well-known/oauth-protected-resource/api/docgrid/mcp/:projectId'], (req, res) => {
     try { const { resource } = projectOf(`${base}/api/docgrid/mcp${req.params.projectId ? `/${req.params.projectId}` : ''}`);
-      return res.json({ resource, authorization_servers: [oauth], scopes_supported: options.scopes || ['docgrid'], bearer_methods_supported: ['header'] });
+      return res.json({ resource, authorization_servers: [oauth], scopes_supported: supportedScopes, bearer_methods_supported: ['header'] });
     } catch { return res.status(404).json({ error: 'Unknown resource' }); }
   });
   const metadata = { issuer: oauth, authorization_endpoint: `${oauth}/authorize`, token_endpoint: `${oauth}/token`, registration_endpoint: `${oauth}/register`,
-    authorization_response_iss_parameter_supported: true, response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: options.scopes || ['docgrid'] };
+    authorization_response_iss_parameter_supported: true, response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: supportedScopes };
   router.get('/.well-known/oauth-authorization-server/api/docgrid/oauth', (_req, res) => res.json(metadata));
   router.get('/api/docgrid/oauth/.well-known/oauth-authorization-server', (_req, res) => res.json(metadata));
   router.post('/api/docgrid/oauth/register', (req, res) => {
